@@ -297,6 +297,13 @@ impl BrainMap {
     pub fn n_regions(&self) -> usize {
         self.regions.len()
     }
+    
+    /// Activate a specific brain region for inference
+    pub fn activate_region(&mut self, region_id: usize) {
+        if region_id < self.regions.len() {
+            self.active_region = Some(region_id);
+        }
+    }
 }
 
 // =============================================================================

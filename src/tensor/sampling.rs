@@ -122,7 +122,7 @@ pub fn sample_min_p(logits: &mut [f32], min_p: f32, temperature: f32) -> usize {
     let max_prob = logits.iter().cloned().fold(0.0f32, f32::max);
     let threshold = max_prob * min_p;
 
-    let mut indices: Vec<usize> = (0..n).filter(|&i| logits[i] >= threshold).collect();
+    let indices: Vec<usize> = (0..n).filter(|&i| logits[i] >= threshold).collect();
     if indices.is_empty() {
         return logits.iter().enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())

@@ -83,10 +83,10 @@ pub struct WeightIndex {
 impl WeightIndex {
     pub fn build(cfg: &ModelConfig) -> Self {
         let dim = cfg.dim;
-        let hidden = cfg.hidden_dim;
+        let _hidden = cfg.hidden_dim;
         let vocab = cfg.vocab_size;
         let n_layers = cfg.n_layers;
-        let n_experts = cfg.n_experts;
+        let _n_experts = cfg.n_experts;
         let group = cfg.int4_group_size;
         let hdr = if cfg.is_moe() || group > 0 { HEADER_SIZE } else { 128 };
 

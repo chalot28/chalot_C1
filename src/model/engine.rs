@@ -5,7 +5,7 @@
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
-use std::thread;
+use rayon::prelude::*;
 
 use crate::tensor::{
     self, bytes_as_f32, matmul_int4, matmul_int8, rmsnorm, sigmoid, gelu, softmax,
@@ -302,51 +302,43 @@ impl Engine {
                     s.expert_out[i] = 0.0;
                 }
 
-                // Parallel MoE Execution: Run selected experts on separate threads
-                // This significantly improves latency on multi-core CPUs.
-                let expert_results: Vec<Vec<f32>> = thread::scope(|scope| {
-                    let handles: Vec<_> = selected.iter().enumerate().map(|(idx, &(expert_id, _))| {
-                        let ew = &lw.experts[expert_id];
-                        let input_x = &s.xb; // Read-only shared ref
-                        
-                        // Spawn thread for this expert
-                        scope.spawn(move || {
-                            let mut out_buf = vec![0.0f32; dim];
-                            // Allocate local scratchpad for this thread (avoids race conditions)
-                            let mut local_hb = vec![0.0f32; hidden];
-                            let mut local_hb2 = vec![0.0f32; hidden];
-                            let mut local_tmp = vec![0.0f32; dim.max(hidden)];
-                            
-                            // Copy input to local temp
-                            local_tmp[..dim].copy_from_slice(input_x);
-
-                            // Gate+Up projection (Int4)
-                            let gu_packed = &wdata[ew.gate_up_offset..ew.gate_up_offset + ew.gate_up_packed_bytes];
-                            let gu_scales = slice_f32(wdata, ew.gate_up_scales_offset, ew.gate_up_scales_count);
-
-                            // Gate
-                            matmul_int4(&mut local_hb, &gu_packed[..ew.gate_up_packed_bytes / 2], 
-                                &gu_scales[..ew.gate_up_scales_count / 2], &local_tmp[..dim], hidden, dim);
-                            // Up
-                            matmul_int4(&mut local_hb2, &gu_packed[ew.gate_up_packed_bytes / 2..], 
-                                &gu_scales[ew.gate_up_scales_count / 2..], &local_tmp[..dim], hidden, dim);
-
-                            // SwiGLU
-                            swiglu_fused(&mut local_hb, &local_hb2);
-
-                            // Down projection (Int4)
-                            let down_packed = &wdata[ew.down_offset..ew.down_offset + ew.down_packed_bytes];
-                            let down_scales = slice_f32(wdata, ew.down_scales_offset, ew.down_scales_count);
-                            
-                            local_tmp[..hidden].copy_from_slice(&local_hb);
-                            matmul_int4(&mut out_buf, down_packed, down_scales, &local_tmp[..hidden], dim, hidden);
-                            
-                            out_buf
-                        })
-                    }).collect();
+                // Parallel MoE Execution using Rayon (persistent thread pool)
+                // This reuses threads across all forward passes for maximum efficiency.
+                let expert_results: Vec<Vec<f32>> = selected.par_iter().map(|(expert_id, _)| {
+                    let ew = &lw.experts[*expert_id];
+                    let mut out_buf = vec![0.0f32; dim];
                     
-                    handles.into_iter().map(|h| h.join().unwrap()).collect()
-                });
+                    // Allocate local scratchpad for this thread (avoids race conditions)
+                    let mut local_hb = vec![0.0f32; hidden];
+                    let mut local_hb2 = vec![0.0f32; hidden];
+                    let mut local_tmp = vec![0.0f32; dim.max(hidden)];
+                    
+                    // Copy input to local temp
+                    local_tmp[..dim].copy_from_slice(&s.xb);
+
+                    // Gate+Up projection (Int4)
+                    let gu_packed = &wdata[ew.gate_up_offset..ew.gate_up_offset + ew.gate_up_packed_bytes];
+                    let gu_scales = slice_f32(wdata, ew.gate_up_scales_offset, ew.gate_up_scales_count);
+
+                    // Gate
+                    matmul_int4(&mut local_hb, &gu_packed[..ew.gate_up_packed_bytes / 2], 
+                        &gu_scales[..ew.gate_up_scales_count / 2], &local_tmp[..dim], hidden, dim);
+                    // Up
+                    matmul_int4(&mut local_hb2, &gu_packed[ew.gate_up_packed_bytes / 2..], 
+                        &gu_scales[ew.gate_up_scales_count / 2..], &local_tmp[..dim], hidden, dim);
+
+                    // SwiGLU
+                    swiglu_fused(&mut local_hb, &local_hb2);
+
+                    // Down projection (Int4)
+                    let down_packed = &wdata[ew.down_offset..ew.down_offset + ew.down_packed_bytes];
+                    let down_scales = slice_f32(wdata, ew.down_scales_offset, ew.down_scales_count);
+                    
+                    local_tmp[..hidden].copy_from_slice(&local_hb);
+                    matmul_int4(&mut out_buf, down_packed, down_scales, &local_tmp[..hidden], dim, hidden);
+                    
+                    out_buf
+                }).collect();
 
                 // Accumulate results from all threads
                 for (idx, &(_, expert_weight)) in selected.iter().enumerate() {
@@ -409,11 +401,14 @@ impl Engine {
                 && layer + 1 == self.config.depth_router_layer
                 && weights.depth_router_bytes > 0
             {
-                active_layers = compute_depth(
-                    &s.x, &mut s.depth_hidden,
-                    wdata, weights, self.config.dim,
-                    self.config.depth_router_layer, n_layers,
-                );
+                #[allow(unused_assignments)]
+                {
+                    active_layers = compute_depth(
+                        &s.x, &mut s.depth_hidden,
+                        wdata, weights, self.config.dim,
+                        self.config.depth_router_layer, n_layers,
+                    );
+                }
             }
 
             // ─── Tri-Layer Dense-Link Logic (Post-Layer Snapshot) ───

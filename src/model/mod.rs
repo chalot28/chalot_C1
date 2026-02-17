@@ -28,6 +28,9 @@ pub mod weight_index;
 pub mod state;
 pub mod engine;
 pub mod dummy;
+pub mod thread_pool;
+pub mod speculative;
+pub mod mmap_prefetch;
 
 // NLLM modules (Nano-LLM architecture)
 pub mod memory;      // Paged KV Cache
@@ -36,18 +39,33 @@ pub mod supervisor;  // Hallucination detection
 pub mod brain_map;   // Brain region management
 
 // Re-export main public APIs
+#[allow(unused_imports)]
 pub use constants::*;
+#[allow(unused_imports)]
 pub use header::FileHeader;
 pub use config::ModelConfig;
+#[allow(unused_imports)]
 pub use weight_index::{ExpertWeightIndex, LayerWeightIndex, WeightIndex};
+#[allow(unused_imports)]
 pub use state::{InferenceState, SparseLoadStats};
+#[allow(unused_imports)]
 pub use engine::{Engine, TaskHead};
 pub use dummy::create_dummy_model;
+#[allow(unused_imports)]
+pub use thread_pool::ExpertThreadPool;
+#[allow(unused_imports)]
+pub use speculative::{SpeculativeDecoder, SpeculativeConfig, SpeculativeResult};
+#[allow(unused_imports)]
+pub use mmap_prefetch::{PrefetchStrategy, prefetch_sequential, prefetch_expert_weights};
 
 // Re-export NLLM APIs
+#[allow(unused_imports)]
 pub use memory::PagedKVCache;
+#[allow(unused_imports)]
 pub use instinct::{InstinctCore, InstinctCoreMut, BrainRegion};
+#[allow(unused_imports)]
 pub use supervisor::Supervisor;
+#[allow(unused_imports)]
 pub use brain_map::BrainMap;
 
 // ---------------------------------------------------------------------------
