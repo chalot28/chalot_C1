@@ -83,6 +83,7 @@ impl ModelConfig {
     }
 
     /// Cấu hình tối ưu cho 100MB RAM theo kiến trúc "3 Tầng - Ống dẫn"
+    #[allow(dead_code)]
     pub fn mobile_tri_layer_config() -> Self {
         Self {
             dim: 192,           // Mỏng lại (Gốc 512) -> Tiết kiệm RAM KV Cache cực lớn
@@ -94,6 +95,43 @@ impl ModelConfig {
             max_seq_len: 2048,
             tri_layer_mode: true, // Cờ bật chế độ 3 tầng
             ..unsafe { std::mem::zeroed() } // Hack để điền các field còn lại (hoặc điền đầy đủ)
+        }
+    }
+
+    /// Cấu hình cho Qwen2.5-0.5B với MoE up-cycling (Pixel 5 tối ưu)
+    /// Qwen gốc: 0.5B params → Up-cycle thành ~1.5B params MoE
+    /// Memory footprint: ~750MB on disk, ~250MB runtime (Top-2 activation)
+    #[allow(dead_code)]
+    pub fn qwen_0_5b_moe_config() -> Self {
+        Self {
+            dim: 896,              // Qwen2.5-0.5B hidden dimension
+            hidden_dim: 4864,      // FFN intermediate size
+            n_layers: 24,          // Qwen2.5-0.5B có 24 transformer blocks
+            n_heads: 14,           // 14 attention heads
+            head_dim: 64,          // 896 / 14 = 64
+            vocab_size: 151936,    // Qwen tokenizer vocab size
+            max_seq_len: 2048,     // Giới hạn context cho mobile
+            is_quantized: true,    // Int8 attention + Int4 experts
+            n_experts: 8,          // Up-cycle: Nhân bản FFN thành 8 experts
+            top_k: 2,              // Chỉ kích hoạt 2 experts/token
+            int4_group_size: 32,   // Group size cho Int4 quantization
+            depth_router_layer: 8, // Adaptive depth sau layer 8
+            tri_layer_mode: true,  // Bật chế độ Brain Map 3 tầng
+        }
+    }
+
+    /// Tính toán layer ranges cho Brain Map (phân vùng Qwen 24-layer)
+    /// - Shallow Reflex: Layer 0-5 (6 layers) - Ngữ pháp, từ vựng
+    /// - Deep Logic: Layer 6-17 (12 layers) - Suy luận, code
+    /// - Hard Fact: Layer 18-23 (6 layers) - Kiến thức tra cứu
+    #[allow(dead_code)]
+    pub fn qwen_brain_map_ranges(&self) -> [(usize, usize); 3] {
+        if self.n_layers == 24 {
+            [(0, 6), (6, 18), (18, 24)] // Shallow, Deep, Fact
+        } else {
+            // Fallback cho các model khác
+            let third = self.n_layers / 3;
+            [(0, third), (third, 2 * third), (2 * third, self.n_layers)]
         }
     }
 }

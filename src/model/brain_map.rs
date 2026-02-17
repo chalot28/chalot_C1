@@ -304,6 +304,76 @@ impl BrainMap {
             self.active_region = Some(region_id);
         }
     }
+
+    /// Tạo cấu hình Brain Map cho Qwen2.5-0.5B (24 layers)
+    /// Phân chia:
+    ///   - Shallow Reflex (0-5): 6 layers, ngữ pháp & từ vựng
+    ///   - Deep Logic (6-17): 12 layers, suy luận & code
+    ///   - Hard Fact (18-23): 6 layers, kiến thức tra cứu
+    #[allow(dead_code)]
+    pub fn qwen_24layer_config() -> Vec<(RegionType, usize, usize)> {
+        vec![
+            (RegionType::ShallowReflex, 6, 896),  // Layers 0-5, dim=896
+            (RegionType::DeepLogic, 12, 896),     // Layers 6-17, dim=896
+            (RegionType::HardFact, 6, 896),       // Layers 18-23, dim=896
+        ]
+    }
+
+    /// Tạo Brain Map file cho Qwen2.5-0.5B từ weights đã chuyển đổi
+    /// path: Đường dẫn file output .brain
+    /// weights: [3 vùng não][n_layers][params] - đã quantized
+    #[allow(dead_code)]
+    pub fn create_qwen_brain_map(
+        path: &Path,
+        shallow_weights: &[u8],
+        deep_weights: &[u8],
+        fact_weights: &[u8],
+    ) -> Result<(), String> {
+        let mut file = File::create(path).map_err(|e| format!("create brain: {e}"))?;
+
+        // Header: Magic + số vùng
+        file.write_all(&0x4252414E_u32.to_le_bytes()).unwrap(); // "BRAN"
+        file.write_all(&3_u32.to_le_bytes()).unwrap(); // 3 regions
+
+        let header_size = 8 + 3 * 48; // Header + 3 region metadata
+        let mut current_offset = header_size;
+
+        // Region metadata
+        let configs = Self::qwen_24layer_config();
+        let weight_slices = [shallow_weights, deep_weights, fact_weights];
+
+        for (i, (&(region_type, n_layers, dim), weights)) in 
+            configs.iter().zip(weight_slices.iter()).enumerate() 
+        {
+            let mut metadata = vec![0u8; 48];
+            
+            // Region type (4 bytes)
+            metadata[0..4].copy_from_slice(&(region_type as u32).to_le_bytes());
+            // File offset (8 bytes)
+            metadata[4..12].copy_from_slice(&(current_offset as u64).to_le_bytes());
+            // Byte size (8 bytes)
+            metadata[12..20].copy_from_slice(&(weights.len() as u64).to_le_bytes());
+            // n_layers (4 bytes)
+            metadata[20..24].copy_from_slice(&(n_layers as u32).to_le_bytes());
+            // dim (4 bytes)
+            metadata[24..28].copy_from_slice(&(dim as u32).to_le_bytes());
+            
+            file.write_all(&metadata).map_err(|e| format!("write metadata {}: {e}", i))?;
+            current_offset += weights.len();
+        }
+
+        // Write actual weights
+        for (i, weights) in weight_slices.iter().enumerate() {
+            file.write_all(weights).map_err(|e| format!("write region {}: {e}", i))?;
+        }
+
+        println!(
+            "[brain_map] Created Qwen 24-layer brain map: {:.1} MB",
+            current_offset as f32 / 1e6
+        );
+
+        Ok(())
+    }
 }
 
 // =============================================================================
