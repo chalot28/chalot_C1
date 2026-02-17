@@ -487,6 +487,7 @@ fn default_config() -> ModelConfig {
         top_k: 2,
         int4_group_size: 64,
         depth_router_layer: DEPTH_ROUTER_AFTER_LAYER,
+        tri_layer_mode: false,  // NLLM tri-layer dense mode (disabled by default)
     }
 }
 

@@ -29,6 +29,12 @@ pub mod state;
 pub mod engine;
 pub mod dummy;
 
+// NLLM modules (Nano-LLM architecture)
+pub mod memory;      // Paged KV Cache
+pub mod instinct;    // Instinct Core with online learning
+pub mod supervisor;  // Hallucination detection
+pub mod brain_map;   // Brain region management
+
 // Re-export main public APIs
 pub use constants::*;
 pub use header::FileHeader;
@@ -37,6 +43,12 @@ pub use weight_index::{ExpertWeightIndex, LayerWeightIndex, WeightIndex};
 pub use state::{InferenceState, SparseLoadStats};
 pub use engine::{Engine, TaskHead};
 pub use dummy::create_dummy_model;
+
+// Re-export NLLM APIs
+pub use memory::PagedKVCache;
+pub use instinct::{InstinctCore, InstinctCoreMut, BrainRegion};
+pub use supervisor::Supervisor;
+pub use brain_map::BrainMap;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -60,8 +72,7 @@ mod tests {
             n_experts: 4,
             top_k: 2,
             int4_group_size: 64,
-            depth_router_layer: 2,
-        }
+            depth_router_layer: 2,            tri_layer_mode: false,        }
     }
 
     #[test]
@@ -128,6 +139,7 @@ mod tests {
             top_k: 2,
             int4_group_size: 64,
             depth_router_layer: 2,
+            tri_layer_mode: false,
         };
         let params = cfg.param_count();
         let params_m = params as f64 / 1e6;

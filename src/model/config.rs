@@ -24,6 +24,8 @@ pub struct ModelConfig {
     pub int4_group_size: usize,
     // Adaptive depth
     pub depth_router_layer: usize,
+    // Architecture
+    pub tri_layer_mode: bool,
 }
 
 impl ModelConfig {
@@ -48,6 +50,7 @@ impl ModelConfig {
             top_k: top_k.min(n_experts),
             int4_group_size: group,
             depth_router_layer: h.depth_router_layer as usize,
+            tri_layer_mode: false, // Mặc định tắt cho các model cũ
         }
     }
 
@@ -77,5 +80,20 @@ impl ModelConfig {
         };
 
         embed + n_layers * per_layer + output + depth_router + dim
+    }
+
+    /// Cấu hình tối ưu cho 100MB RAM theo kiến trúc "3 Tầng - Ống dẫn"
+    pub fn mobile_tri_layer_config() -> Self {
+        Self {
+            dim: 192,           // Mỏng lại (Gốc 512) -> Tiết kiệm RAM KV Cache cực lớn
+            hidden_dim: 512,    // Hidden cũng nhỏ lại
+            n_layers: 24,       // Tăng số lớp (Gốc 12) -> Suy luận sâu hơn
+            n_heads: 6,
+            head_dim: 32,
+            vocab_size: 32000,  // Ví dụ
+            max_seq_len: 2048,
+            tri_layer_mode: true, // Cờ bật chế độ 3 tầng
+            ..unsafe { std::mem::zeroed() } // Hack để điền các field còn lại (hoặc điền đầy đủ)
+        }
     }
 }

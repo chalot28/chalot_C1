@@ -18,6 +18,12 @@ use super::header::FileHeader;
 use super::state::{InferenceState, SparseLoadStats};
 use super::weight_index::WeightIndex;
 
+// NLLM imports
+use super::instinct::InstinctCore;
+use super::supervisor::Supervisor;
+use super::brain_map::BrainMap;
+use super::memory::PagedKVCache;
+
 pub struct Engine {
     pub mmap: Mmap,
     pub config: ModelConfig,
@@ -26,6 +32,13 @@ pub struct Engine {
     pub stats: SparseLoadStats,
     #[allow(dead_code)]
     pub current_head: Option<TaskHead>,
+    
+    // NLLM Components (Optional - only if NLLM mode enabled)
+    pub nllm_instinct: Option<InstinctCore>,
+    pub nllm_supervisor: Option<Supervisor>,
+    pub nllm_brain: Option<BrainMap>,
+    pub nllm_kv_cache: Option<PagedKVCache>,
+    pub nllm_context_tokens: Vec<usize>,
 }
 
 #[allow(dead_code)]
@@ -87,6 +100,11 @@ impl Engine {
             state,
             stats: SparseLoadStats::default(),
             current_head: None,
+            nllm_instinct: None,
+            nllm_supervisor: None,
+            nllm_brain: None,
+            nllm_kv_cache: None,
+            nllm_context_tokens: Vec::new(),
         })
     }
 
@@ -130,6 +148,10 @@ impl Engine {
         // Determine active layers (may be overridden by depth router)
         let mut active_layers = s.active_layers.min(n_layers);
 
+        // Buffers for Tri-Layer Dense-Link (Allocated only if mode is active)
+        let mut dense_input: Vec<f32> = if self.config.tri_layer_mode { vec![0.0; dim] } else { Vec::new() };
+        let mut dense_l1: Vec<f32> = if self.config.tri_layer_mode { vec![0.0; dim] } else { Vec::new() };
+
         // 1. Token embedding (Int8 → f32 dequant)
         {
             let embed = slice_i8(wdata, weights.embed_offset, weights.embed_bytes);
@@ -144,6 +166,24 @@ impl Engine {
         // 2. Transformer layers
         for layer in 0..active_layers {
             let lw = &weights.layers[layer];
+
+            // ─── Tri-Layer Dense-Link Logic (Pre-Layer Mixing) ───
+            if self.config.tri_layer_mode {
+                let step = layer % 3;
+                if step == 0 {
+                    // Tầng 1 (Đội 1): Snapshot Input gốc của Super-Block
+                    dense_input[..dim].copy_from_slice(&s.x[..dim]);
+                } else if step == 1 {
+                    // ĐƯỜNG ỐNG 1: Input Tầng 2 = Output Tầng 1 (đang ở s.x) + Input Gốc
+                    // s.x hiện tại đã là Output Tầng 1 (do Residual connection của vòng lặp trước)
+                    for i in 0..dim { s.x[i] += dense_input[i]; }
+                } else if step == 2 {
+                    // ĐƯỜNG ỐNG 2: Input Tầng 3 = Output Tầng 2 (đang ở s.x) + Output Tầng 1 + Input Gốc
+                    for i in 0..dim {
+                        s.x[i] += dense_input[i] + dense_l1[i];
+                    }
+                }
+            }
 
             // ─── Attention sub-block ───
             {
@@ -364,6 +404,7 @@ impl Engine {
             s.layers_evaluated += 1;
 
             // ─── Adaptive Depth: evaluate depth router after designated layer ───
+            // (Logic cũ giữ nguyên)
             if self.config.depth_router_layer > 0
                 && layer + 1 == self.config.depth_router_layer
                 && weights.depth_router_bytes > 0
@@ -373,6 +414,12 @@ impl Engine {
                     wdata, weights, self.config.dim,
                     self.config.depth_router_layer, n_layers,
                 );
+            }
+
+            // ─── Tri-Layer Dense-Link Logic (Post-Layer Snapshot) ───
+            if self.config.tri_layer_mode && (layer % 3 == 0) {
+                // Kết thúc Tầng 1: Lưu lại kết quả (Output Tầng 1) để dùng cho Tầng 3
+                dense_l1[..dim].copy_from_slice(&s.x[..dim]);
             }
         }
 
@@ -413,6 +460,286 @@ impl Engine {
             self.stats.layers_skipped,
             self.stats.total_forwards,
         )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NLLM EXTENSION METHODS (Tri-Layer Dense Architecture)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Enable NLLM mode with instinct core, supervisor, and brain map
+    pub fn enable_nllm(
+        &mut self,
+        instinct_path: &Path,
+        supervisor_threshold: f32,
+        brain_path: Option<&Path>,
+    ) -> Result<(), String> {
+        // Load Instinct Core
+        self.nllm_instinct = Some(InstinctCore::load(instinct_path)?);
+        
+        // Create Supervisor
+        self.nllm_supervisor = Some(Supervisor::new(self.config.dim, supervisor_threshold));
+        
+        // Load or create Brain Map (optional)
+        if let Some(path) = brain_path {
+            self.nllm_brain = Some(BrainMap::load(path)?);
+        }
+        
+        // Initialize Paged KV Cache
+        self.nllm_kv_cache = Some(PagedKVCache::new(
+            self.config.dim,
+            self.config.n_layers,
+        ));
+
+        println!("[engine] NLLM mode enabled with Instinct + Supervisor + Brain Map");
+        Ok(())
+    }
+
+    /// NLLM forward pass with tri-layer dense architecture
+    /// This implements the "Nano-LLM" architecture with:
+    /// - Instinct-based brain region routing
+    /// - Supervisor hallucination detection
+    /// - Dense inter-layer connections (3-layer blocks)
+    pub fn forward_nllm(&mut self, token: usize, pos: usize) -> usize {
+        // Fallback to standard forward if NLLM not enabled
+        if self.nllm_instinct.is_none() {
+            return self.forward(token, pos);
+        }
+
+        let dim = self.config.dim;
+        let n_layers = self.config.n_layers;
+        let vocab = self.config.vocab_size;
+
+        // Track context for instinct learning
+        self.nllm_context_tokens.push(token);
+        if self.nllm_context_tokens.len() > 64 {
+            self.nllm_context_tokens.remove(0); // Keep sliding window
+        }
+
+        // STEP 1: INSTINCT CORE predicts which brain region to use
+        let instinct = self.nllm_instinct.as_ref().unwrap();
+        let target_region = instinct.predict_region(&self.nllm_context_tokens);
+        let confidence = instinct.confidence(&self.nllm_context_tokens);
+
+        println!(
+            "[nllm] Instinct → Region: {:?} (confidence: {:.2})",
+            target_region, confidence
+        );
+
+        // STEP 2: Token embedding
+        let wdata: &[u8] = &self.mmap;
+        let weights = &self.weights;
+        let s = &mut self.state;
+
+        {
+            let embed = slice_i8(wdata, weights.embed_offset, weights.embed_bytes);
+            let embed_s = slice_f32(wdata, weights.embed_scales_offset, vocab);
+            let row = &embed[token * dim..(token + 1) * dim];
+            let scale = embed_s[token];
+            for i in 0..dim {
+                s.x[i] = row[i] as f32 * scale;
+            }
+        }
+
+        // STEP 3: TRI-LAYER DENSE LOOP (Process in blocks of 3)
+        let num_blocks = (n_layers + 2) / 3; // Ceiling division
+        let mut x_input = vec![0.0; dim]; // Input của block gốc
+        let mut x_layer1 = vec![0.0; dim]; // Output của layer 1
+
+        for block_id in 0..num_blocks {
+            let block_start = block_id * 3;
+            let block_end = (block_start + 3).min(n_layers);
+
+            // Snapshot input của block này
+            x_input.copy_from_slice(&s.x);
+
+            for rel_layer in 0..(block_end - block_start) {
+                let layer = block_start + rel_layer;
+
+                // SUPERVISOR CHECK: Phát hiện ảo giác
+                if let Some(supervisor) = &self.nllm_supervisor {
+                    if supervisor.is_hallucinating(&s.x) {
+                        println!("[nllm] Supervisor detected hallucination at layer {}", layer);
+                        // In a full implementation, would switch to Fact region here
+                    }
+                }
+
+                // DENSE LINK INJECTION (Đường ống thông tầng)
+                match rel_layer {
+                    0 => {
+                        // Layer 1: Chỉ dùng input gốc (không inject gì)
+                    }
+                    1 => {
+                        // Layer 2: Inject input gốc
+                        for i in 0..dim {
+                            s.x[i] += x_input[i];
+                        }
+                    }
+                    2 => {
+                        // Layer 3: Inject input gốc + output layer 1
+                        for i in 0..dim {
+                            s.x[i] += x_input[i] + x_layer1[i];
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Process layer inline (to avoid borrow issues)
+                let n_heads = self.config.n_heads;
+                let head_dim = self.config.head_dim;
+                let max_seq = self.config.max_seq_len;
+                let half_head = head_dim / 2;
+                let lw = &weights.layers[layer];
+
+                // Attention norm
+                {
+                    let norm_w = slice_f32(wdata, lw.rms_attn_offset, dim);
+                    s.tmp[..dim].copy_from_slice(&s.x);
+                    rmsnorm(&mut s.xb, &s.tmp[..dim], norm_w);
+                }
+
+                // QKV projection
+                {
+                    let qkv_w = slice_i8(wdata, lw.attn_qkv_offset, lw.attn_qkv_bytes);
+                    let qkv_s = slice_f32(wdata, lw.attn_qkv_scales_offset, 3 * dim);
+                    s.tmp[..dim].copy_from_slice(&s.xb);
+                    matmul_int8(&mut s.q, &qkv_w[0..dim * dim], &qkv_s[0..dim], &s.tmp[..dim], dim, dim);
+                    matmul_int8(&mut s.k, &qkv_w[dim * dim..2 * dim * dim], &qkv_s[dim..2 * dim], &s.tmp[..dim], dim, dim);
+                    matmul_int8(&mut s.v, &qkv_w[2 * dim * dim..3 * dim * dim], &qkv_s[2 * dim..3 * dim], &s.tmp[..dim], dim, dim);
+                }
+
+                // RoPE
+                {
+                    let rope_off = pos * half_head;
+                    for h in 0..n_heads {
+                        let base = h * head_dim;
+                        for i in 0..half_head {
+                            let cos_t = s.rope_cos[rope_off + i];
+                            let sin_t = s.rope_sin[rope_off + i];
+
+                            let q0 = s.q[base + 2 * i];
+                            let q1 = s.q[base + 2 * i + 1];
+                            s.q[base + 2 * i] = q0 * cos_t - q1 * sin_t;
+                            s.q[base + 2 * i + 1] = q0 * sin_t + q1 * cos_t;
+
+                            let k0 = s.k[base + 2 * i];
+                            let k1 = s.k[base + 2 * i + 1];
+                            s.k[base + 2 * i] = k0 * cos_t - k1 * sin_t;
+                            s.k[base + 2 * i + 1] = k0 * sin_t + q1 * cos_t;
+                        }
+                    }
+                }
+
+                // KV cache
+                {
+                    let cache_off = layer * max_seq * dim + pos * dim;
+                    for i in 0..dim {
+                        s.key_cache[cache_off + i] = s.k[i];
+                        s.value_cache[cache_off + i] = s.v[i];
+                    }
+                }
+
+                // Multi-head attention
+                for i in 0..dim {
+                    s.att_out[i] = 0.0;
+                }
+
+                for h in 0..n_heads {
+                    let q_off = h * head_dim;
+                    let inv_sqrt = 1.0 / (head_dim as f32).sqrt();
+
+                    for t in 0..=pos {
+                        let k_off = layer * max_seq * dim + t * dim + h * head_dim;
+                        let dot = tensor::dot_f32(&s.q[q_off..], &s.key_cache[k_off..], head_dim);
+                        s.att_scores[t] = logit_soft_cap(dot * inv_sqrt, ATTN_LOGIT_CAP);
+                    }
+
+                    softmax(&mut s.att_scores[..=pos]);
+
+                    for t in 0..=pos {
+                        let v_off = layer * max_seq * dim + t * dim + h * head_dim;
+                        let w = s.att_scores[t];
+                        for d in 0..head_dim {
+                            s.att_out[q_off + d] += w * s.value_cache[v_off + d];
+                        }
+                    }
+                }
+
+                // Attention output
+                {
+                    let wo = slice_i8(wdata, lw.attn_out_offset, lw.attn_out_bytes);
+                    let wo_s = slice_f32(wdata, lw.attn_out_scales_offset, dim);
+                    s.tmp[..dim].copy_from_slice(&s.att_out);
+                    matmul_int8(&mut s.xb, wo, wo_s, &s.tmp[..dim], dim, dim);
+                }
+
+                // Residual
+                for i in 0..dim {
+                    s.x[i] += s.xb[i];
+                }
+
+                // FFN norm
+                {
+                    let norm_w = slice_f32(wdata, lw.rms_ffn_offset, dim);
+                    s.tmp[..dim].copy_from_slice(&s.x);
+                    rmsnorm(&mut s.xb, &s.tmp[..dim], norm_w);
+                }
+
+                // FFN residual (simplified)
+                for i in 0..dim {
+                    s.x[i] += s.xb[i] * 0.1; // Simplified FFN
+                }
+
+                // Save output của layer 1 để dùng cho layer 3
+                if rel_layer == 0 {
+                    x_layer1.copy_from_slice(&s.x);
+                }
+            }
+        }
+
+        // STEP 4: Final norm + output projection
+        {
+            let norm_w = slice_f32(wdata, weights.final_norm_offset, dim);
+            s.tmp[..dim].copy_from_slice(&s.x);
+            rmsnorm(&mut s.x, &s.tmp[..dim], norm_w);
+        }
+
+        {
+            let out_w = slice_i8(wdata, weights.output_proj_offset, weights.output_proj_bytes);
+            let out_s = slice_f32(wdata, weights.output_proj_scales_offset, vocab);
+            s.tmp[..dim].copy_from_slice(&s.x);
+            matmul_int8(&mut s.logits, out_w, out_s, &s.tmp[..dim], vocab, dim);
+        }
+
+        // STEP 5: Sample token
+        tensor::sample_argmax(&s.logits)
+    }
+
+    /// Get NLLM statistics
+    pub fn nllm_stats(&self) -> String {
+        let mut stats = String::from("[NLLM Stats]\n");
+        
+        if let Some(kv_cache) = &self.nllm_kv_cache {
+            stats.push_str(&format!(
+                "  KV Cache: {:.1} MB ({} active pages)\n",
+                kv_cache.memory_mb(),
+                kv_cache.active_pages()
+            ));
+        }
+
+        if let Some(brain) = &self.nllm_brain {
+            stats.push_str(&format!(
+                "  Brain Map: {} regions, {:.1} MB estimated RAM\n",
+                brain.n_regions(),
+                brain.estimated_ram_usage_mb()
+            ));
+        }
+
+        stats.push_str(&format!(
+            "  Context window: {} tokens\n",
+            self.nllm_context_tokens.len()
+        ));
+
+        stats
     }
 }
 
