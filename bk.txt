@@ -1,0 +1,805 @@
+// =============================================================================
+// model.rs — Transformer model mapped from .myai binary file
+// =============================================================================
+//
+// Memory layout mirrors the FILE BINARY LAYOUT exactly (zero-copy via mmap).
+// All weights are Int8 quantized; scales are F32.
+//
+// Target: dim=256, hidden_dim=1024, layers=8, heads=8, vocab=8192
+// Total backbone weights ≈ 8M params @ Int8 ≈ ~10 MB on disk/RAM.
+// =============================================================================
+
+use memmap2::Mmap;
+use std::fs::File;
+use std::path::Path;
+
+use crate::tensor::{
+    self, bytes_as_f32, matmul_int8, rmsnorm, softmax,
+};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+pub const MAGIC: u32 = 0x4D594149; // "MYAI"
+pub const HEADER_SIZE: usize = 128;
+pub const MAX_SEQ_LEN: usize = 512;
+
+// ---------------------------------------------------------------------------
+// Header (first 128 bytes of .myai file)
+// ---------------------------------------------------------------------------
+/// On-disk header — must be exactly 128 bytes.
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct FileHeader {
+    pub magic: u32,
+    pub version: u32,
+    pub dim: u32,
+    pub hidden_dim: u32,
+    pub n_layers: u32,
+    pub n_heads: u32,
+    pub vocab_size: u32,
+    pub flags: u32, // bit 0 = is_quantized, bit 1 = head_type
+    pub _reserved: [u8; 128 - 8 * 4], // pad to 128 bytes
+}
+
+impl FileHeader {
+    /// Read header from the first 128 bytes of a memory-mapped file.
+    pub fn from_bytes(data: &[u8]) -> &FileHeader {
+        assert!(data.len() >= HEADER_SIZE);
+        // SAFETY: FileHeader is repr(C, packed), size = 128, alignment = 1.
+        unsafe { &*(data.as_ptr() as *const FileHeader) }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let magic = self.magic;
+        let version = self.version;
+        if magic != MAGIC {
+            return Err(format!("Bad magic: 0x{:08X} (expected 0x{:08X})", magic, MAGIC));
+        }
+        if version != 1 {
+            return Err(format!("Unsupported version: {}", version));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModelConfig — runtime-friendly copy of header values
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct ModelConfig {
+    pub dim: usize,
+    pub hidden_dim: usize,
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub head_dim: usize,
+    pub vocab_size: usize,
+    pub max_seq_len: usize,
+    pub is_quantized: bool,
+}
+
+impl ModelConfig {
+    pub fn from_header(h: &FileHeader) -> Self {
+        let dim = h.dim as usize;
+        let n_heads = h.n_heads as usize;
+        Self {
+            dim,
+            hidden_dim: h.hidden_dim as usize,
+            n_layers: h.n_layers as usize,
+            n_heads,
+            head_dim: dim / n_heads,
+            vocab_size: h.vocab_size as usize,
+            max_seq_len: MAX_SEQ_LEN,
+            is_quantized: (h.flags & 1) != 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weight offsets — pointers into the mmap'd file (after header)
+// ---------------------------------------------------------------------------
+/// Describes byte offsets for every weight tensor inside the backbone.
+/// Computed once during model load.
+#[derive(Debug)]
+pub struct WeightIndex {
+    // Token embeddings: [vocab_size × dim] Int8
+    pub embed_offset: usize,
+    pub embed_bytes: usize,
+
+    // Per-layer offsets (indexed by layer id)
+    pub layers: Vec<LayerWeightIndex>,
+
+    // Final RMS norm weights: [dim] F32
+    pub final_norm_offset: usize,
+
+    // Output projection (tied with embeddings or separate)
+    pub output_proj_offset: usize,
+    pub output_proj_bytes: usize,
+    pub output_proj_scales_offset: usize,
+
+    // Total bytes of backbone
+    pub total_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct LayerWeightIndex {
+    // Attention QKV packed: [3 × dim × dim] Int8
+    pub attn_qkv_offset: usize,
+    pub attn_qkv_bytes: usize,
+    // QKV scales: [3 × dim] F32
+    pub attn_qkv_scales_offset: usize,
+    pub attn_qkv_scales_bytes: usize,
+
+    // Attention output: [dim × dim] Int8
+    pub attn_out_offset: usize,
+    pub attn_out_bytes: usize,
+    pub attn_out_scales_offset: usize,
+    pub attn_out_scales_bytes: usize,
+
+    // FFN gate+up packed: [2 × hidden_dim × dim] Int8
+    pub ffn_gate_up_offset: usize,
+    pub ffn_gate_up_bytes: usize,
+    pub ffn_gate_up_scales_offset: usize,
+    pub ffn_gate_up_scales_bytes: usize,
+
+    // FFN down: [dim × hidden_dim] Int8
+    pub ffn_down_offset: usize,
+    pub ffn_down_bytes: usize,
+    pub ffn_down_scales_offset: usize,
+    pub ffn_down_scales_bytes: usize,
+
+    // RMS norm weights: [dim] F32  (attention + FFN = 2 norms)
+    pub rms_attn_offset: usize,
+    pub rms_ffn_offset: usize,
+    pub rms_bytes: usize, // dim * 4
+}
+
+impl WeightIndex {
+    /// Build the weight index given model configuration.
+    pub fn build(cfg: &ModelConfig) -> Self {
+        let dim = cfg.dim;
+        let _hidden = cfg.hidden_dim;
+        let vocab = cfg.vocab_size;
+        let n_layers = cfg.n_layers;
+
+        let mut cursor = HEADER_SIZE;
+
+        // 1. Token embeddings
+        let embed_offset = cursor;
+        let embed_bytes = vocab * dim; // Int8
+        cursor += embed_bytes;
+
+        // 2. Per-layer weights
+        let mut layers = Vec::with_capacity(n_layers);
+        for _ in 0..n_layers {
+            let l = Self::build_layer(cfg, &mut cursor);
+            layers.push(l);
+        }
+
+        // 3. Final RMS norm
+        let final_norm_offset = cursor;
+        cursor += dim * 4; // F32
+
+        // 4. Output projection: [vocab × dim] Int8 + [vocab] F32 scales
+        let output_proj_offset = cursor;
+        let output_proj_bytes = vocab * dim;
+        cursor += output_proj_bytes;
+
+        let output_proj_scales_offset = cursor;
+        cursor += vocab * 4;
+
+        WeightIndex {
+            embed_offset,
+            embed_bytes,
+            layers,
+            final_norm_offset,
+            output_proj_offset,
+            output_proj_bytes,
+            output_proj_scales_offset,
+            total_bytes: cursor,
+        }
+    }
+
+    fn build_layer(cfg: &ModelConfig, cursor: &mut usize) -> LayerWeightIndex {
+        let dim = cfg.dim;
+        let hidden = cfg.hidden_dim;
+
+        // RMS norm (attention)
+        let rms_attn_offset = *cursor;
+        let rms_bytes = dim * 4;
+        *cursor += rms_bytes;
+
+        // Attn QKV packed: [3 * dim * dim] Int8
+        let attn_qkv_offset = *cursor;
+        let attn_qkv_bytes = 3 * dim * dim;
+        *cursor += attn_qkv_bytes;
+
+        // Attn QKV scales: [3 * dim] F32
+        let attn_qkv_scales_offset = *cursor;
+        let attn_qkv_scales_bytes = 3 * dim * 4;
+        *cursor += attn_qkv_scales_bytes;
+
+        // Attn output: [dim * dim] Int8
+        let attn_out_offset = *cursor;
+        let attn_out_bytes = dim * dim;
+        *cursor += attn_out_bytes;
+
+        let attn_out_scales_offset = *cursor;
+        let attn_out_scales_bytes = dim * 4;
+        *cursor += attn_out_scales_bytes;
+
+        // RMS norm (FFN)
+        let rms_ffn_offset = *cursor;
+        *cursor += rms_bytes;
+
+        // FFN gate+up: [2 * hidden * dim] Int8
+        let ffn_gate_up_offset = *cursor;
+        let ffn_gate_up_bytes = 2 * hidden * dim;
+        *cursor += ffn_gate_up_bytes;
+
+        let ffn_gate_up_scales_offset = *cursor;
+        let ffn_gate_up_scales_bytes = 2 * hidden * 4;
+        *cursor += ffn_gate_up_scales_bytes;
+
+        // FFN down: [dim * hidden] Int8
+        let ffn_down_offset = *cursor;
+        let ffn_down_bytes = dim * hidden;
+        *cursor += ffn_down_bytes;
+
+        let ffn_down_scales_offset = *cursor;
+        let ffn_down_scales_bytes = dim * 4;
+        *cursor += ffn_down_scales_bytes;
+
+        LayerWeightIndex {
+            attn_qkv_offset,
+            attn_qkv_bytes,
+            attn_qkv_scales_offset,
+            attn_qkv_scales_bytes,
+            attn_out_offset,
+            attn_out_bytes,
+            attn_out_scales_offset,
+            attn_out_scales_bytes,
+            ffn_gate_up_offset,
+            ffn_gate_up_bytes,
+            ffn_gate_up_scales_offset,
+            ffn_gate_up_scales_bytes,
+            ffn_down_offset,
+            ffn_down_bytes,
+            ffn_down_scales_offset,
+            ffn_down_scales_bytes,
+            rms_attn_offset,
+            rms_ffn_offset,
+            rms_bytes,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InferenceState — pre-allocated scratchpad (~1 MB)
+// ---------------------------------------------------------------------------
+pub struct InferenceState {
+    // Current token embedding / layer input  (dim)
+    pub x: Vec<f32>,
+    // Buffer for norm output (dim)
+    pub xb: Vec<f32>,
+    // QKV buffers (dim each)
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    // Attention output buffer (dim)
+    pub att_out: Vec<f32>,
+    // Attention scores per head (max_seq_len)
+    pub att_scores: Vec<f32>,
+    // FFN hidden buffers (hidden_dim)
+    pub hb: Vec<f32>,  // gate output
+    pub hb2: Vec<f32>, // up output
+    // Output logits (vocab_size)
+    pub logits: Vec<f32>,
+    // KV cache: [n_layers][max_seq_len][dim] for K and V
+    pub key_cache: Vec<f32>,
+    pub value_cache: Vec<f32>,
+    // --- Optimization buffers (allocated once, reused every forward) ---
+    // Temp buffer to avoid .clone() in hot path (size = max(dim, hidden_dim))
+    pub tmp: Vec<f32>,
+    // Pre-computed RoPE cos/sin tables [max_seq_len * head_dim/2]
+    pub rope_cos: Vec<f32>,
+    pub rope_sin: Vec<f32>,
+}
+
+impl InferenceState {
+    pub fn new(cfg: &ModelConfig) -> Self {
+        let dim = cfg.dim;
+        let hidden = cfg.hidden_dim;
+        let vocab = cfg.vocab_size;
+        let kv_size = cfg.n_layers * cfg.max_seq_len * dim;
+        let half_head = cfg.head_dim / 2;
+        let rope_len = cfg.max_seq_len * half_head;
+
+        // Pre-compute RoPE frequency table
+        let mut rope_cos = vec![0.0f32; rope_len];
+        let mut rope_sin = vec![0.0f32; rope_len];
+        for pos in 0..cfg.max_seq_len {
+            for i in 0..half_head {
+                let freq = 1.0 / 10000.0f32.powf((2 * i) as f32 / cfg.head_dim as f32);
+                let theta = pos as f32 * freq;
+                rope_cos[pos * half_head + i] = theta.cos();
+                rope_sin[pos * half_head + i] = theta.sin();
+            }
+        }
+
+        Self {
+            x: vec![0.0; dim],
+            xb: vec![0.0; dim],
+            q: vec![0.0; dim],
+            k: vec![0.0; dim],
+            v: vec![0.0; dim],
+            att_out: vec![0.0; dim],
+            att_scores: vec![0.0; cfg.max_seq_len],
+            hb: vec![0.0; hidden],
+            hb2: vec![0.0; hidden],
+            logits: vec![0.0; vocab],
+            key_cache: vec![0.0; kv_size],
+            value_cache: vec![0.0; kv_size],
+            tmp: vec![0.0; dim.max(hidden)],
+            rope_cos,
+            rope_sin,
+        }
+    }
+
+    /// Estimated memory usage in bytes.
+    pub fn memory_bytes(&self) -> usize {
+        (self.x.len()
+            + self.xb.len()
+            + self.q.len()
+            + self.k.len()
+            + self.v.len()
+            + self.att_out.len()
+            + self.att_scores.len()
+            + self.hb.len()
+            + self.hb2.len()
+            + self.logits.len()
+            + self.key_cache.len()
+            + self.value_cache.len()
+            + self.tmp.len()
+            + self.rope_cos.len()
+            + self.rope_sin.len())
+            * 4
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine — owns the mmap + swappable task head
+// ---------------------------------------------------------------------------
+pub struct Engine {
+    /// Memory-mapped backbone weights (read-only, OS page-cached).
+    pub mmap: Mmap,
+    pub config: ModelConfig,
+    pub weights: WeightIndex,
+    pub state: InferenceState,
+    /// Optional task-specific head (loaded from separate .bin file).
+    #[allow(dead_code)]
+    pub current_head: Option<TaskHead>,
+}
+
+#[allow(dead_code)]
+pub struct TaskHead {
+    pub name: String,
+    pub data: Vec<u8>, // raw bytes
+}
+
+impl Engine {
+    // -- construction --------------------------------------------------------
+
+    /// Load backbone from a `.myai` file.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let file = File::open(path).map_err(|e| format!("open: {e}"))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap: {e}"))?;
+
+        if mmap.len() < HEADER_SIZE {
+            return Err("File too small for header".into());
+        }
+
+        let header = FileHeader::from_bytes(&mmap);
+        header.validate()?;
+
+        let config = ModelConfig::from_header(header);
+        let weights = WeightIndex::build(&config);
+
+        if mmap.len() < weights.total_bytes {
+            return Err(format!(
+                "File too small: {} < {} expected",
+                mmap.len(),
+                weights.total_bytes
+            ));
+        }
+
+        let state = InferenceState::new(&config);
+
+        println!(
+            "[engine] Loaded model: dim={}, layers={}, heads={}, vocab={}, backbone={:.2} MB, scratchpad={:.2} MB",
+            config.dim,
+            config.n_layers,
+            config.n_heads,
+            config.vocab_size,
+            weights.total_bytes as f64 / 1e6,
+            state.memory_bytes() as f64 / 1e6,
+        );
+
+        Ok(Self {
+            mmap,
+            config,
+            weights,
+            state,
+            current_head: None,
+        })
+    }
+
+    // -- task head swapping --------------------------------------------------
+
+    /// Swap the current task head. Drops old head immediately.
+    #[allow(dead_code)]
+    pub fn switch_task(&mut self, task_file: &str) -> Result<(), String> {
+        // Drop old head first → free RAM
+        self.current_head = None;
+
+        let data = std::fs::read(task_file).map_err(|e| format!("load head: {e}"))?;
+        let name = Path::new(task_file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        println!("[engine] Loaded task head '{}' ({} bytes)", name, data.len());
+        self.current_head = Some(TaskHead { name, data });
+        Ok(())
+    }
+
+    // -- forward pass --------------------------------------------------------
+
+    /// Run a single forward pass for one token at a given position.
+    /// Returns the argmax token id (greedy decode for now).
+    /// Zero allocations in hot path — all buffers pre-allocated.
+    pub fn forward(&mut self, token: usize, pos: usize) -> usize {
+        let dim = self.config.dim;
+        let hidden = self.config.hidden_dim;
+        let n_heads = self.config.n_heads;
+        let head_dim = self.config.head_dim;
+        let n_layers = self.config.n_layers;
+        let max_seq = self.config.max_seq_len;
+        let vocab = self.config.vocab_size;
+        let half_head = head_dim / 2;
+
+        // Split borrows: mmap (read-only) vs state (mutable)
+        let wdata: &[u8] = &self.mmap;
+        let weights = &self.weights;
+        let s = &mut self.state;
+
+        // 1. Token embedding lookup → dequantize to f32
+        {
+            let embed = slice_i8(wdata, weights.embed_offset, weights.embed_bytes);
+            let row = &embed[token * dim..(token + 1) * dim];
+            for i in 0..dim {
+                s.x[i] = row[i] as f32 / 127.0;
+            }
+        }
+
+        // 2. Transformer layers (zero-alloc inner loop)
+        for layer in 0..n_layers {
+            let lw = &weights.layers[layer];
+
+            // --- Attention sub-block ---
+            // RMSNorm: x → xb (via tmp to avoid clone)
+            {
+                let norm_w = slice_f32(wdata, lw.rms_attn_offset, dim);
+                s.tmp[..dim].copy_from_slice(&s.x);
+                rmsnorm(&mut s.xb, &s.tmp[..dim], norm_w);
+            }
+
+            // QKV projection: xb → q, k, v (via tmp)
+            {
+                let qkv_w = slice_i8(wdata, lw.attn_qkv_offset, lw.attn_qkv_bytes);
+                let qkv_s = slice_f32(wdata, lw.attn_qkv_scales_offset, 3 * dim);
+                s.tmp[..dim].copy_from_slice(&s.xb);
+                matmul_int8(&mut s.q, &qkv_w[0..dim * dim], &qkv_s[0..dim], &s.tmp[..dim], dim, dim);
+                matmul_int8(&mut s.k, &qkv_w[dim * dim..2 * dim * dim], &qkv_s[dim..2 * dim], &s.tmp[..dim], dim, dim);
+                matmul_int8(&mut s.v, &qkv_w[2 * dim * dim..3 * dim * dim], &qkv_s[2 * dim..3 * dim], &s.tmp[..dim], dim, dim);
+            }
+
+            // RoPE (pre-computed cos/sin — no transcendental calls)
+            {
+                let rope_off = pos * half_head;
+                for h in 0..n_heads {
+                    let base = h * head_dim;
+                    for i in 0..half_head {
+                        let cos_t = s.rope_cos[rope_off + i];
+                        let sin_t = s.rope_sin[rope_off + i];
+
+                        let q0 = s.q[base + 2 * i];
+                        let q1 = s.q[base + 2 * i + 1];
+                        s.q[base + 2 * i] = q0 * cos_t - q1 * sin_t;
+                        s.q[base + 2 * i + 1] = q0 * sin_t + q1 * cos_t;
+
+                        let k0 = s.k[base + 2 * i];
+                        let k1 = s.k[base + 2 * i + 1];
+                        s.k[base + 2 * i] = k0 * cos_t - k1 * sin_t;
+                        s.k[base + 2 * i + 1] = k0 * sin_t + k1 * cos_t;
+                    }
+                }
+            }
+
+            // Store K, V into ring-buffer cache (no clone — direct indexed copy)
+            {
+                let cache_off = layer * max_seq * dim + pos * dim;
+                for i in 0..dim {
+                    s.key_cache[cache_off + i] = s.k[i];
+                    s.value_cache[cache_off + i] = s.v[i];
+                }
+            }
+
+            // Multi-head attention (fused score + softmax + weighted sum)
+            for i in 0..dim { s.att_out[i] = 0.0; }
+
+            for h in 0..n_heads {
+                let q_off = h * head_dim;
+                let inv_sqrt = 1.0 / (head_dim as f32).sqrt();
+
+                // Attention scores
+                for t in 0..=pos {
+                    let k_off = layer * max_seq * dim + t * dim + h * head_dim;
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += s.q[q_off + d] * s.key_cache[k_off + d];
+                    }
+                    s.att_scores[t] = dot * inv_sqrt;
+                }
+
+                softmax(&mut s.att_scores[..=pos]);
+
+                // Weighted sum of values
+                for d in 0..head_dim {
+                    let mut val = 0.0f32;
+                    for t in 0..=pos {
+                        let v_off = layer * max_seq * dim + t * dim + h * head_dim;
+                        val += s.att_scores[t] * s.value_cache[v_off + d];
+                    }
+                    s.att_out[q_off + d] = val;
+                }
+            }
+
+            // Attention output projection (via tmp)
+            {
+                let wo = slice_i8(wdata, lw.attn_out_offset, lw.attn_out_bytes);
+                let wo_s = slice_f32(wdata, lw.attn_out_scales_offset, dim);
+                s.tmp[..dim].copy_from_slice(&s.att_out);
+                matmul_int8(&mut s.xb, wo, wo_s, &s.tmp[..dim], dim, dim);
+            }
+
+            // Residual connection
+            for i in 0..dim { s.x[i] += s.xb[i]; }
+
+            // --- FFN sub-block ---
+            // RMSNorm: x → xb (via tmp)
+            {
+                let norm_w = slice_f32(wdata, lw.rms_ffn_offset, dim);
+                s.tmp[..dim].copy_from_slice(&s.x);
+                rmsnorm(&mut s.xb, &s.tmp[..dim], norm_w);
+            }
+
+            // Gate + Up projection (via tmp)
+            {
+                let gu_w = slice_i8(wdata, lw.ffn_gate_up_offset, lw.ffn_gate_up_bytes);
+                let gu_s = slice_f32(wdata, lw.ffn_gate_up_scales_offset, 2 * hidden);
+                s.tmp[..dim].copy_from_slice(&s.xb);
+                matmul_int8(&mut s.hb, &gu_w[0..hidden * dim], &gu_s[0..hidden], &s.tmp[..dim], hidden, dim);
+                matmul_int8(&mut s.hb2, &gu_w[hidden * dim..2 * hidden * dim], &gu_s[hidden..2 * hidden], &s.tmp[..dim], hidden, dim);
+            }
+
+            // SiLU(gate) * up — fused activation
+            for i in 0..hidden {
+                let g = s.hb[i];
+                s.hb[i] = (g / (1.0 + (-g).exp())) * s.hb2[i];
+            }
+
+            // Down projection (via tmp)
+            {
+                let dw = slice_i8(wdata, lw.ffn_down_offset, lw.ffn_down_bytes);
+                let ds = slice_f32(wdata, lw.ffn_down_scales_offset, dim);
+                s.tmp[..hidden].copy_from_slice(&s.hb);
+                matmul_int8(&mut s.xb, dw, ds, &s.tmp[..hidden], dim, hidden);
+            }
+
+            // Residual connection
+            for i in 0..dim { s.x[i] += s.xb[i]; }
+        }
+
+        // 3. Final RMS norm (via tmp)
+        {
+            let norm_w = slice_f32(wdata, weights.final_norm_offset, dim);
+            s.tmp[..dim].copy_from_slice(&s.x);
+            rmsnorm(&mut s.x, &s.tmp[..dim], norm_w);
+        }
+
+        // 4. Output projection → logits (via tmp)
+        {
+            let out_w = slice_i8(wdata, weights.output_proj_offset, weights.output_proj_bytes);
+            let out_s = slice_f32(wdata, weights.output_proj_scales_offset, vocab);
+            s.tmp[..dim].copy_from_slice(&s.x);
+            matmul_int8(&mut s.logits, out_w, out_s, &s.tmp[..dim], vocab, dim);
+        }
+
+        // 5. Greedy decode
+        tensor::sample_argmax(&s.logits)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free-standing weight accessors (avoid &self borrow conflicts)
+// ---------------------------------------------------------------------------
+
+/// Read a slice of the mmap as `&[i8]`.
+fn slice_i8(data: &[u8], offset: usize, len: usize) -> &[i8] {
+    let bytes = &data[offset..offset + len];
+    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i8, len) }
+}
+
+/// Read a slice of the mmap as `&[f32]` (count = number of f32 elements).
+fn slice_f32(data: &[u8], offset: usize, count: usize) -> &[f32] {
+    bytes_as_f32(&data[offset..offset + count * 4])
+}
+
+// ---------------------------------------------------------------------------
+// Utility: create a dummy .myai file for testing
+// ---------------------------------------------------------------------------
+pub fn create_dummy_model(path: &Path, cfg: &ModelConfig) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let weights = WeightIndex::build(cfg);
+    let mut buf = vec![0u8; weights.total_bytes];
+
+    // Write header
+    let header = FileHeader {
+        magic: MAGIC,
+        version: 1,
+        dim: cfg.dim as u32,
+        hidden_dim: cfg.hidden_dim as u32,
+        n_layers: cfg.n_layers as u32,
+        n_heads: cfg.n_heads as u32,
+        vocab_size: cfg.vocab_size as u32,
+        flags: if cfg.is_quantized { 1 } else { 0 },
+        _reserved: [0u8; 128 - 8 * 4],
+    };
+
+    // Copy header bytes
+    let hdr_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            &header as *const FileHeader as *const u8,
+            HEADER_SIZE,
+        )
+    };
+    buf[..HEADER_SIZE].copy_from_slice(hdr_bytes);
+
+    // Fill RMS norm weights with 1.0 (so norm passes through)
+    for layer in &weights.layers {
+        let norm_bytes_f32 = cfg.dim;
+        // Attention norm
+        for i in 0..norm_bytes_f32 {
+            let off = layer.rms_attn_offset + i * 4;
+            buf[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        // FFN norm
+        for i in 0..norm_bytes_f32 {
+            let off = layer.rms_ffn_offset + i * 4;
+            buf[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+
+        // Set all weight scales to a small value so outputs are bounded
+        let scale_val: f32 = 0.01;
+        let scale_bytes = scale_val.to_le_bytes();
+
+        // QKV scales (3*dim)
+        for i in 0..(3 * cfg.dim) {
+            let off = layer.attn_qkv_scales_offset + i * 4;
+            buf[off..off + 4].copy_from_slice(&scale_bytes);
+        }
+        // Attn out scales (dim)
+        for i in 0..cfg.dim {
+            let off = layer.attn_out_scales_offset + i * 4;
+            buf[off..off + 4].copy_from_slice(&scale_bytes);
+        }
+        // FFN gate+up scales (2*hidden)
+        for i in 0..(2 * cfg.hidden_dim) {
+            let off = layer.ffn_gate_up_scales_offset + i * 4;
+            buf[off..off + 4].copy_from_slice(&scale_bytes);
+        }
+        // FFN down scales (dim)
+        for i in 0..cfg.dim {
+            let off = layer.ffn_down_scales_offset + i * 4;
+            buf[off..off + 4].copy_from_slice(&scale_bytes);
+        }
+    }
+
+    // Final norm = 1.0
+    for i in 0..cfg.dim {
+        let off = weights.final_norm_offset + i * 4;
+        buf[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
+    }
+
+    // Output projection scales
+    let scale_val: f32 = 0.01;
+    for i in 0..cfg.vocab_size {
+        let off = weights.output_proj_scales_offset + i * 4;
+        buf[off..off + 4].copy_from_slice(&scale_val.to_le_bytes());
+    }
+
+    let mut file = File::create(path)?;
+    file.write_all(&buf)?;
+    file.flush()?;
+
+    println!(
+        "[model] Created dummy model at {:?} ({:.2} MB)",
+        path,
+        buf.len() as f64 / 1e6
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_config() -> ModelConfig {
+        ModelConfig {
+            dim: 256,
+            hidden_dim: 1024,
+            n_layers: 8,
+            n_heads: 8,
+            head_dim: 32,
+            vocab_size: 8192,
+            max_seq_len: MAX_SEQ_LEN,
+            is_quantized: true,
+        }
+    }
+
+    #[test]
+    fn test_header_size() {
+        assert_eq!(std::mem::size_of::<FileHeader>(), HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_weight_index_build() {
+        let cfg = test_config();
+        let idx = WeightIndex::build(&cfg);
+        assert_eq!(idx.layers.len(), 8);
+        assert!(idx.total_bytes > 0);
+        println!("Total backbone bytes: {} ({:.2} MB)", idx.total_bytes, idx.total_bytes as f64 / 1e6);
+    }
+
+    #[test]
+    fn test_dummy_model_load_and_forward() {
+        let cfg = test_config();
+        let tmp = PathBuf::from("test_model.myai");
+        create_dummy_model(&tmp, &cfg).unwrap();
+
+        let mut engine = Engine::load(&tmp).unwrap();
+        let token_id = engine.forward(42, 0);
+        println!("Forward pass result token: {}", token_id);
+        assert!(token_id < cfg.vocab_size);
+
+        // Cleanup
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_inference_state_memory() {
+        let cfg = test_config();
+        let state = InferenceState::new(&cfg);
+        let mem = state.memory_bytes();
+        println!("InferenceState memory: {} bytes ({:.2} MB)", mem, mem as f64 / 1e6);
+        // Should be well under 50 MB
+        assert!(mem < 50_000_000);
+    }
+}
