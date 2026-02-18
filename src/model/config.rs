@@ -32,6 +32,8 @@ pub struct ModelConfig {
     pub tri_layer_mode: bool,
     #[allow(dead_code)]
     pub speculative_steps: usize, // [NEW] Số token dự đoán trước (Drafting)
+    // RoPE
+    pub rope_theta: f32,      // RoPE frequency base (10000 for default, 1000000 for Qwen)
 }
 
 impl ModelConfig {
@@ -62,6 +64,7 @@ impl ModelConfig {
             depth_router_layer: h.depth_router_layer as usize,
             tri_layer_mode: false, // Mặc định tắt cho các model cũ
             speculative_steps: 0,
+            rope_theta: h.rope_theta_f32(),
         }
     }
 
@@ -114,6 +117,7 @@ impl ModelConfig {
             is_bitnet: true,    // [OPTIMIZATION] Ternary weights (-1, 0, 1)
             tri_layer_mode: true, // Cờ bật chế độ 3 tầng
             speculative_steps: 3, // Dự đoán trước 3 token bằng ShallowReflex
+            rope_theta: 10000.0,
             ..unsafe { std::mem::zeroed() } // Hack để điền các field còn lại (hoặc điền đầy đủ)
         }
     }
@@ -140,6 +144,7 @@ impl ModelConfig {
             depth_router_layer: 8, // Adaptive depth sau layer 8
             tri_layer_mode: true,  // Bật chế độ Brain Map 3 tầng
             speculative_steps: 2,  // Enable speculative decoding
+            rope_theta: 1000000.0, // Qwen2.5 uses rope_theta=1000000
         }
     }
 

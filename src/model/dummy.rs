@@ -33,6 +33,7 @@ pub fn create_dummy_model(path: &Path, cfg: &ModelConfig) -> std::io::Result<()>
         int4_group_size: cfg.int4_group_size as u32,
         depth_router_layer: cfg.depth_router_layer as u32,
         max_seq_len: cfg.max_seq_len as u32,
+        rope_theta: if cfg.rope_theta == 10000.0 { 0 } else { (cfg.rope_theta * 100.0) as u32 },
     };
     header.write_to(&mut buf);
 

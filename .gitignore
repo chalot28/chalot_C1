@@ -1,1 +1,6 @@
 /target
+/.venv
+
+qwen_moe.myai
+
+qwen_moe.mytok 

@@ -25,11 +25,12 @@ mod model;
 mod tokenizer;
 mod crawler;
 
-use model::{Engine, ModelConfig, MAX_SEQ_LEN, create_dummy_model, DEPTH_ROUTER_AFTER_LAYER};
+use model::{Engine, ModelConfig, MAX_SEQ_LEN, create_dummy_model, DEPTH_ROUTER_AFTER_LAYER, SamplingConfig, SamplingStrategy};
 use tokenizer::Tokenizer;
 use crawler::Crawler;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use std::io::Write;
 
 // ---------------------------------------------------------------------------
 // Entrypoint
@@ -215,7 +216,7 @@ fn cmd_crawl(args: &[String]) {
     let url = &args[3];
 
     let mut engine = load_engine(&model_path);
-    let tok = Tokenizer::new(engine.config.vocab_size);
+    let tok = load_tokenizer(&model_path, engine.config.vocab_size);
     let mut crawler = Crawler::new();
 
     println!("[crawl] Fetching: {}", url);
@@ -238,7 +239,7 @@ fn cmd_crawl(args: &[String]) {
             let tokens = tok.encode(&result.text);
             println!("\n[crawl] Tokenized: {} tokens", tokens.len());
 
-            run_inference_pipeline(&mut engine, &tokens, &tok);
+            run_inference_pipeline(&mut engine, &tokens, &tok, &SamplingConfig::default(), 128);
         }
         Err(e) => eprintln!("[crawl] Error: {}", e),
     }
@@ -296,7 +297,7 @@ fn cmd_api(args: &[String]) {
     }
 
     let mut engine = load_engine(&model_path);
-    let tok = Tokenizer::new(engine.config.vocab_size);
+    let tok = load_tokenizer(&model_path, engine.config.vocab_size);
     let mut crawler = Crawler::new();
 
     let hdr_refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -319,7 +320,7 @@ fn cmd_api(args: &[String]) {
             let tokens = tok.encode(&result.text);
             println!("\n[api] Tokenized: {} tokens", tokens.len());
 
-            run_inference_pipeline(&mut engine, &tokens, &tok);
+            run_inference_pipeline(&mut engine, &tokens, &tok, &SamplingConfig::default(), 128);
         }
         Err(e) => eprintln!("[api] Error: {}", e),
     }
@@ -337,7 +338,7 @@ fn cmd_file(args: &[String]) {
     let file_path = &args[3];
 
     let mut engine = load_engine(&model_path);
-    let tok = Tokenizer::new(engine.config.vocab_size);
+    let tok = load_tokenizer(&model_path, engine.config.vocab_size);
     let crawler = Crawler::new();
 
     println!("[file] Reading: {}", file_path);
@@ -356,7 +357,7 @@ fn cmd_file(args: &[String]) {
             let tokens = tok.encode(&result.text);
             println!("\n[file] Tokenized: {} tokens", tokens.len());
 
-            run_inference_pipeline(&mut engine, &tokens, &tok);
+            run_inference_pipeline(&mut engine, &tokens, &tok, &SamplingConfig::default(), 128);
         }
         Err(e) => eprintln!("[file] Error: {}", e),
     }
@@ -374,7 +375,7 @@ fn cmd_sys(args: &[String]) {
     let cmd = args[3..].join(" ");
 
     let mut engine = load_engine(&model_path);
-    let tok = Tokenizer::new(engine.config.vocab_size);
+    let tok = load_tokenizer(&model_path, engine.config.vocab_size);
     let crawler = Crawler::new();
 
     println!("[sys] Running: {}", cmd);
@@ -389,7 +390,7 @@ fn cmd_sys(args: &[String]) {
             let tokens = tok.encode(&result.text);
             println!("[sys] Tokenized: {} tokens", tokens.len());
 
-            run_inference_pipeline(&mut engine, &tokens, &tok);
+            run_inference_pipeline(&mut engine, &tokens, &tok, &SamplingConfig::default(), 128);
         }
         Err(e) => eprintln!("[sys] Error: {}", e),
     }
@@ -400,20 +401,115 @@ fn cmd_sys(args: &[String]) {
 // ---------------------------------------------------------------------------
 fn cmd_gen(args: &[String]) {
     if args.len() < 4 {
-        eprintln!("[error] Usage: gen <model.myai> <TEXT>");
+        eprintln!("[error] Usage: gen <model.myai> <TEXT> [options]");
+        eprintln!("  Options:");
+        eprintln!("    -t <float>    Temperature (default: 0.7, 0=greedy)");
+        eprintln!("    -p <float>    Top-p nucleus (default: 0.9)");
+        eprintln!("    -k <int>      Top-k (if set, uses top-k instead of top-p)");
+        eprintln!("    -n <int>      Max tokens to generate (default: 256)");
+        eprintln!("    -r <float>    Repetition penalty (default: 1.15)");
+        eprintln!("    --raw         Skip chat template, use raw text");
         return;
     }
     let model_path = PathBuf::from(&args[2]);
-    let text = args[3..].join(" ");
+
+    // Separate text from flags: collect everything that doesn't start with '-'
+    // until we hit a flag, then parse flags
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut sampling = SamplingConfig::default();
+    let mut max_tokens: usize = 256;
+    let mut raw_mode = false;
+
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-t" | "--temperature" => {
+                if i + 1 < args.len() {
+                    if let Ok(v) = args[i + 1].parse::<f32>() {
+                        sampling.temperature = v;
+                        if v == 0.0 { sampling.strategy = SamplingStrategy::Greedy; }
+                    }
+                    i += 2;
+                } else { i += 1; }
+            }
+            "-p" | "--top-p" => {
+                if i + 1 < args.len() {
+                    if let Ok(v) = args[i + 1].parse::<f32>() {
+                        sampling.top_p = v;
+                        sampling.strategy = SamplingStrategy::TopP;
+                    }
+                    i += 2;
+                } else { i += 1; }
+            }
+            "-k" | "--top-k" => {
+                if i + 1 < args.len() {
+                    if let Ok(v) = args[i + 1].parse::<usize>() {
+                        sampling.top_k = v;
+                        sampling.strategy = SamplingStrategy::TopK;
+                    }
+                    i += 2;
+                } else { i += 1; }
+            }
+            "-n" | "--max-tokens" => {
+                if i + 1 < args.len() {
+                    if let Ok(v) = args[i + 1].parse::<usize>() { max_tokens = v; }
+                    i += 2;
+                } else { i += 1; }
+            }
+            "-r" | "--rep-penalty" => {
+                if i + 1 < args.len() {
+                    if let Ok(v) = args[i + 1].parse::<f32>() { sampling.repetition_penalty = v; }
+                    i += 2;
+                } else { i += 1; }
+            }
+            "--raw" => {
+                raw_mode = true;
+                i += 1;
+            }
+            _ => {
+                text_parts.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    let text = text_parts.join(" ");
+    if text.is_empty() {
+        eprintln!("[error] No input text provided");
+        return;
+    }
 
     let mut engine = load_engine(&model_path);
-    let tok = Tokenizer::new(engine.config.vocab_size);
+    let tok = load_tokenizer(&model_path, engine.config.vocab_size);
 
-    println!("[gen] Input: \"{}\"", text);
-    let tokens = tok.encode(&text);
-    println!("[gen] Tokenized: {} tokens → {:?}", tokens.len(), &tokens[..tokens.len().min(20)]);
+    // Discover stop tokens from tokenizer vocab
+    let mut stop_tokens = Vec::new();
+    for special in &["<|im_end|>", "<|endoftext|>", "<|im_start|>"] {
+        if let Some(id) = tok.find_token_id(special) {
+            stop_tokens.push(id as usize);
+            println!("[gen] Stop token: '{}' → ID {}", special, id);
+        }
+    }
+    sampling.stop_tokens = stop_tokens;
 
-    run_inference_pipeline(&mut engine, &tokens, &tok);
+    // Format with Qwen chat template (unless --raw)
+    let prompt = if raw_mode {
+        text.clone()
+    } else {
+        format_qwen_chat(&text)
+    };
+
+    println!("[gen] Input: \"{}\"", &text);
+    if !raw_mode {
+        println!("[gen] Using Qwen chat template");
+    }
+    println!("[gen] Sampling: {:?}, temp={:.2}, top_p={:.2}, rep_penalty={:.2}",
+        sampling.strategy, sampling.temperature, sampling.top_p, sampling.repetition_penalty);
+
+    let tokens = tok.encode(&prompt);
+    println!("[gen] Tokenized: {} tokens → {:?}...", tokens.len(), &tokens[..tokens.len().min(10)]);
+
+    run_inference_pipeline(&mut engine, &tokens, &tok, &sampling, max_tokens);
 }
 
 // ---------------------------------------------------------------------------
@@ -491,11 +587,49 @@ fn default_config() -> ModelConfig {
         depth_router_layer: DEPTH_ROUTER_AFTER_LAYER,
         tri_layer_mode: false,  // NLLM tri-layer dense mode (disabled by default)
         speculative_steps: 0,
+        rope_theta: 10000.0,
     }
 }
 
 fn get_model_path(args: &[String], index: usize) -> Option<PathBuf> {
     args.get(index).map(PathBuf::from)
+}
+
+/// Try to load a HuggingFace tokenizer (.mytok) adjacent to the model file.
+/// Falls back to byte-level tokenizer if not found.
+fn load_tokenizer(model_path: &Path, vocab_size: usize) -> Tokenizer {
+    // Try <model_name>.mytok
+    let mytok_path = model_path.with_extension("mytok");
+    if mytok_path.exists() {
+        match Tokenizer::load_hf_vocab(&mytok_path) {
+            Ok(tok) => {
+                println!("[tokenizer] Loaded HF tokenizer from {:?}", mytok_path);
+                return tok;
+            }
+            Err(e) => {
+                eprintln!("[tokenizer] Warning: Failed to load {:?}: {}", mytok_path, e);
+            }
+        }
+    }
+
+    // Try tokenizer.mytok in same directory
+    if let Some(parent) = model_path.parent() {
+        let alt_path = parent.join("tokenizer.mytok");
+        if alt_path.exists() {
+            match Tokenizer::load_hf_vocab(&alt_path) {
+                Ok(tok) => {
+                    println!("[tokenizer] Loaded HF tokenizer from {:?}", alt_path);
+                    return tok;
+                }
+                Err(e) => {
+                    eprintln!("[tokenizer] Warning: Failed to load {:?}: {}", alt_path, e);
+                }
+            }
+        }
+    }
+
+    println!("[tokenizer] Using byte-level fallback (no .mytok file found)");
+    Tokenizer::new(vocab_size)
 }
 
 fn load_engine(path: &PathBuf) -> Engine {
@@ -565,38 +699,91 @@ fn run_inference(engine: &mut Engine, seed_token: usize, gen_len: usize) -> (Vec
     (tokens, t0.elapsed().as_secs_f64())
 }
 
-/// Pipeline: take pre-tokenized input, run inference, decode output.
-fn run_inference_pipeline(engine: &mut Engine, input_tokens: &[u32], tok: &Tokenizer) {
+/// Format text using Qwen chat template.
+fn format_qwen_chat(user_input: &str) -> String {
+    format!(
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+        user_input
+    )
+}
+
+/// Pipeline: take pre-tokenized input, run inference with smart sampling, stream output.
+fn run_inference_pipeline(
+    engine: &mut Engine,
+    input_tokens: &[u32],
+    tok: &Tokenizer,
+    sampling: &SamplingConfig,
+    max_gen_tokens: usize,
+) {
+    let vocab = engine.config.vocab_size;
     let max_seq = engine.config.max_seq_len;
-    let gen_len = 32.min(max_seq.saturating_sub(input_tokens.len()));
 
-    // Use last token of input as seed (or BOS=1 if empty)
-    let seed = input_tokens.last().copied().unwrap_or(1) as usize;
+    // Convert to usize and clamp to vocab range
+    let tokens: Vec<usize> = input_tokens.iter()
+        .map(|&t| (t as usize).min(vocab - 1))
+        .collect();
 
-    // Clamp seed to vocab range
-    let seed = seed.min(engine.config.vocab_size - 1);
+    // Phase 1: PREFILL — process all input tokens to build KV cache
+    let gen_budget = max_gen_tokens.min(max_seq.saturating_sub(tokens.len()));
+    let n_prefill = tokens.len().min(max_seq.saturating_sub(gen_budget).max(1));
 
     println!(
-        "\n[inference] seed_token={}, generating {} tokens (MoE top-{}/{})...",
-        seed, gen_len, engine.config.top_k, engine.config.n_experts
+        "\n[inference] Prefilling {} tokens (MoE top-{}/{})...",
+        n_prefill, engine.config.top_k, engine.config.n_experts
     );
-    let (out_tokens, elapsed) = run_inference(engine, seed, gen_len);
-    let tok_per_sec = gen_len as f64 / elapsed.max(0.001);
 
+    let t0 = Instant::now();
+    for (pos, &tok_id) in tokens[..n_prefill].iter().enumerate() {
+        engine.forward(tok_id, pos);
+    }
+    let prefill_time = t0.elapsed();
     println!(
-        "[inference] Done in {:.1} ms ({:.1} tok/s)",
-        elapsed * 1000.0,
-        tok_per_sec
+        "[inference] Prefill: {:.1} ms ({:.1} tok/s)",
+        prefill_time.as_secs_f64() * 1000.0,
+        n_prefill as f64 / prefill_time.as_secs_f64().max(0.001)
+    );
+
+    // Phase 2: GENERATE — autoregressive decoding with streaming output
+    let mut token_history = tokens.clone();
+    let mut next_token = engine.sample_from_logits(sampling, &token_history);
+
+    print!("\n");
+    let _ = std::io::stdout().flush();
+
+    let t1 = Instant::now();
+    let mut gen_count = 0;
+
+    for step in 0..gen_budget {
+        let pos = n_prefill + step;
+        if pos >= max_seq {
+            break;
+        }
+
+        // Check for stop tokens
+        if sampling.stop_tokens.contains(&next_token) {
+            break;
+        }
+
+        // Decode and stream this token
+        let token_str = tok.decode_token(next_token as u32);
+        print!("{}", token_str);
+        let _ = std::io::stdout().flush();
+
+        token_history.push(next_token);
+        gen_count += 1;
+
+        // Forward pass for next token
+        engine.forward(next_token, pos);
+        next_token = engine.sample_from_logits(sampling, &token_history);
+    }
+
+    let gen_time = t1.elapsed();
+    println!(
+        "\n\n[inference] Generated {} tokens in {:.1} ms ({:.1} tok/s)",
+        gen_count,
+        gen_time.as_secs_f64() * 1000.0,
+        gen_count as f64 / gen_time.as_secs_f64().max(0.001)
     );
     println!("[inference] {}", engine.sparse_stats_report());
-
-    // Decode output tokens
-    let out_u32: Vec<u32> = out_tokens.iter().map(|&t| t as u32).collect();
-    let decoded = tok.decode(&out_u32);
-
-    println!("[inference] Output IDs: {:?}", &out_tokens[..out_tokens.len().min(16)]);
-    if !decoded.is_empty() {
-        println!("[inference] Decoded: \"{}\"", decoded);
-    }
     println!();
 }

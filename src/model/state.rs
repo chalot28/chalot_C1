@@ -49,9 +49,10 @@ impl InferenceState {
         // Pre-compute RoPE frequency table
         let mut rope_cos = vec![0.0f32; rope_len];
         let mut rope_sin = vec![0.0f32; rope_len];
+        let rope_theta = cfg.rope_theta;
         for pos in 0..cfg.max_seq_len {
             for i in 0..half_head {
-                let freq = 1.0 / 10000.0f32.powf((2 * i) as f32 / cfg.head_dim as f32);
+                let freq = 1.0 / rope_theta.powf((2 * i) as f32 / cfg.head_dim as f32);
                 let theta = pos as f32 * freq;
                 rope_cos[pos * half_head + i] = theta.cos();
                 rope_sin[pos * half_head + i] = theta.sin();

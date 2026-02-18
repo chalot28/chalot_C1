@@ -49,7 +49,7 @@ pub use weight_index::{ExpertWeightIndex, LayerWeightIndex, WeightIndex};
 #[allow(unused_imports)]
 pub use state::{InferenceState, SparseLoadStats};
 #[allow(unused_imports)]
-pub use engine::{Engine, TaskHead};
+pub use engine::{Engine, TaskHead, SamplingConfig, SamplingStrategy};
 pub use dummy::create_dummy_model;
 #[allow(unused_imports)]
 pub use thread_pool::ExpertThreadPool;
@@ -87,10 +87,16 @@ mod tests {
             vocab_size: 256,
             max_seq_len: 64,
             is_quantized: true,
+            is_bitnet: false,
+            n_kv_heads: 4,
             n_experts: 4,
             top_k: 2,
             int4_group_size: 64,
-            depth_router_layer: 2,            tri_layer_mode: false,        }
+            depth_router_layer: 2,
+            tri_layer_mode: false,
+            speculative_steps: 0,
+            rope_theta: 10000.0,
+        }
     }
 
     #[test]
@@ -153,11 +159,15 @@ mod tests {
             vocab_size: 32000,
             max_seq_len: 512,
             is_quantized: true,
+            is_bitnet: false,
+            n_kv_heads: 8,
             n_experts: 4,
             top_k: 2,
             int4_group_size: 64,
             depth_router_layer: 2,
             tri_layer_mode: false,
+            speculative_steps: 0,
+            rope_theta: 10000.0,
         };
         let params = cfg.param_count();
         let params_m = params as f64 / 1e6;

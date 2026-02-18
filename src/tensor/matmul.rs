@@ -367,8 +367,9 @@ pub fn matmul_int4(
     x: &[f32],
     out_dim: usize,
     in_dim: usize,
+    group_size: usize,
 ) {
-    let group = INT4_GROUP_SIZE;
+    let group = if group_size > 0 { group_size } else { INT4_GROUP_SIZE };
     let n_groups = (in_dim + group - 1) / group;
     let packed_row = (in_dim + 1) / 2;
 

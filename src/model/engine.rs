@@ -24,6 +24,43 @@ use super::supervisor::Supervisor;
 use super::brain_map::BrainMap;
 use super::memory::PagedKVCache;
 
+/// Sampling strategy for token generation
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SamplingStrategy {
+    Greedy,   // Always pick highest probability
+    TopK,     // Sample from top-K candidates
+    TopP,     // Nucleus sampling (cumulative probability cutoff)
+    MinP,     // Min-P adaptive sampling
+}
+
+/// Configuration for text generation sampling
+#[derive(Debug, Clone)]
+pub struct SamplingConfig {
+    pub strategy: SamplingStrategy,
+    pub temperature: f32,       // 0.0 = deterministic, >1.0 = more random
+    pub top_k: usize,           // For TopK strategy
+    pub top_p: f32,             // For TopP strategy (0.0-1.0)
+    pub min_p: f32,             // For MinP strategy
+    pub repetition_penalty: f32, // >1.0 penalizes repetition
+    pub repetition_window: usize, // How many recent tokens to penalize
+    pub stop_tokens: Vec<usize>, // Token IDs that trigger generation stop
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            strategy: SamplingStrategy::TopP,
+            temperature: 0.7,
+            top_k: 40,
+            top_p: 0.9,
+            min_p: 0.05,
+            repetition_penalty: 1.15,
+            repetition_window: 64,
+            stop_tokens: Vec::new(),
+        }
+    }
+}
+
 pub struct Engine {
     pub mmap: Mmap,
     pub config: ModelConfig,
@@ -68,12 +105,15 @@ impl Engine {
         let config = ModelConfig::from_header(&header);
         let weights = WeightIndex::build(&config);
 
+        // Warning if size mismatch, but continue (allow flexibility)
         if mmap.len() < weights.total_bytes {
-            return Err(format!(
-                "File too small: {} < {} expected",
+            eprintln!(
+                "[warning] File size {} is smaller than expected {} (difference: {} bytes)",
                 mmap.len(),
-                weights.total_bytes
-            ));
+                weights.total_bytes,
+                weights.total_bytes - mmap.len()
+            );
+            eprintln!("[warning] Continuing anyway - model may not work correctly");
         }
 
         let state = InferenceState::new(&config);
@@ -141,6 +181,7 @@ impl Engine {
         let half_head = head_dim / 2;
         let n_experts = self.config.n_experts;
         let top_k = self.config.top_k;
+        let int4_group = self.config.int4_group_size;
 
         let wdata: &[u8] = &self.mmap;
         let weights = &self.weights;
@@ -327,10 +368,10 @@ impl Engine {
 
                     // Gate
                     matmul_int4(&mut local_hb, &gu_packed[..ew.gate_up_packed_bytes / 2], 
-                        &gu_scales[..ew.gate_up_scales_count / 2], &local_tmp[..dim], hidden, dim);
+                        &gu_scales[..ew.gate_up_scales_count / 2], &local_tmp[..dim], hidden, dim, int4_group);
                     // Up
                     matmul_int4(&mut local_hb2, &gu_packed[ew.gate_up_packed_bytes / 2..], 
-                        &gu_scales[ew.gate_up_scales_count / 2..], &local_tmp[..dim], hidden, dim);
+                        &gu_scales[ew.gate_up_scales_count / 2..], &local_tmp[..dim], hidden, dim, int4_group);
 
                     // SwiGLU
                     swiglu_fused(&mut local_hb, &local_hb2);
@@ -340,7 +381,7 @@ impl Engine {
                     let down_scales = slice_f32(wdata, ew.down_scales_offset, ew.down_scales_count);
                     
                     local_tmp[..hidden].copy_from_slice(&local_hb);
-                    matmul_int4(&mut out_buf, down_packed, down_scales, &local_tmp[..hidden], dim, hidden);
+                    matmul_int4(&mut out_buf, down_packed, down_scales, &local_tmp[..hidden], dim, hidden, int4_group);
                     
                     out_buf
                 }).collect();
@@ -374,6 +415,7 @@ impl Engine {
                         &s.tmp[..dim],
                         hidden,
                         dim,
+                        int4_group,
                     );
                     matmul_int4(
                         &mut s.hb2,
@@ -382,6 +424,7 @@ impl Engine {
                         &s.tmp[..dim],
                         hidden,
                         dim,
+                        int4_group,
                     );
 
                     // SwiGLU: fused SiLU(gate) × up — single cache-efficient pass
@@ -390,7 +433,7 @@ impl Engine {
                     let down_packed = &wdata[ew.down_offset..ew.down_offset + ew.down_packed_bytes];
                     let down_scales = slice_f32(wdata, ew.down_scales_offset, ew.down_scales_count);
                     s.tmp[..hidden].copy_from_slice(&s.hb);
-                    matmul_int4(&mut s.xb, down_packed, down_scales, &s.tmp[..hidden], dim, hidden);
+                    matmul_int4(&mut s.xb, down_packed, down_scales, &s.tmp[..hidden], dim, hidden, int4_group);
 
                     for i in 0..dim {
                         s.x[i] += s.xb[i];
@@ -448,6 +491,81 @@ impl Engine {
 
         // 5. Greedy decode
         tensor::sample_argmax(&s.logits)
+    }
+
+    /// Generate tokens with full pipeline: prefill + autoregressive + smart sampling.
+    pub fn generate(
+        &mut self,
+        input_tokens: &[usize],
+        max_new_tokens: usize,
+        sampling: &SamplingConfig,
+    ) -> Vec<usize> {
+        let max_seq = self.config.max_seq_len;
+        let vocab = self.config.vocab_size;
+        let mut output_tokens = Vec::with_capacity(max_new_tokens);
+        let mut token_history: Vec<usize> = input_tokens.to_vec();
+
+        // Phase 1: PREFILL — Process all input tokens to build KV cache
+        let n_prefill = input_tokens.len().min(max_seq.saturating_sub(max_new_tokens).max(1));
+        if n_prefill > 0 {
+            for (pos, &tok) in input_tokens[..n_prefill].iter().enumerate() {
+                let clamped = tok.min(vocab - 1);
+                self.forward(clamped, pos);
+            }
+        }
+
+        // Phase 2: GENERATE — Autoregressive decoding with smart sampling
+        let start_pos = n_prefill;
+        // After prefill, logits hold predictions from the last input token
+        let mut next_token = if n_prefill > 0 {
+            self.sample_from_logits(sampling, &token_history)
+        } else {
+            1 // BOS
+        };
+
+        for step in 0..max_new_tokens {
+            let pos = start_pos + step;
+            if pos >= max_seq {
+                break;
+            }
+
+            // Check for stop tokens
+            if sampling.stop_tokens.contains(&next_token) {
+                break;
+            }
+
+            output_tokens.push(next_token);
+            token_history.push(next_token);
+
+            // Forward pass
+            self.forward(next_token, pos);
+
+            // Smart sampling with repetition penalty
+            next_token = self.sample_from_logits(sampling, &token_history);
+        }
+
+        output_tokens
+    }
+
+    /// Sample from current logits using the configured strategy.
+    pub fn sample_from_logits(&mut self, cfg: &SamplingConfig, history: &[usize]) -> usize {
+        let logits = &mut self.state.logits;
+
+        // Apply repetition penalty
+        if cfg.repetition_penalty > 1.0 && !history.is_empty() {
+            // Only look at recent history (last N tokens)
+            let window = history.len().min(cfg.repetition_window);
+            let recent = &history[history.len() - window..];
+            tensor::apply_repetition_penalty(logits, recent, cfg.repetition_penalty);
+        }
+
+        // Sample based on strategy
+        match cfg.strategy {
+            SamplingStrategy::Greedy => tensor::sample_argmax(logits),
+            SamplingStrategy::TopK => tensor::sample_top_k(logits, cfg.top_k, cfg.temperature),
+            SamplingStrategy::TopP => tensor::sample_top_p(logits, cfg.top_p, cfg.temperature),
+            SamplingStrategy::MinP => tensor::sample_min_p(logits, cfg.min_p, cfg.temperature),
+        }
     }
 
     /// Report sparse loading statistics.

@@ -121,7 +121,7 @@ mod tests {
         let w_scales = vec![1.0f32 / 7.0; out_dim * n_groups];
         let x: Vec<f32> = vec![1.0; in_dim];
         let mut out = vec![0.0f32; out_dim];
-        matmul_int4(&mut out, &w_packed, &w_scales, &x, out_dim, in_dim);
+        matmul_int4(&mut out, &w_packed, &w_scales, &x, out_dim, in_dim, 64);
         // Row 0: sum of 64 * (7/7 * 1.0) with quantisation ≈ 64ish
         assert!(out[0].abs() > 10.0, "row 0 should have large output: {}", out[0]);
         assert!(out[1].abs() < 1.0, "row 1 should be near zero: {}", out[1]);

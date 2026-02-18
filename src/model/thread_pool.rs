@@ -29,6 +29,7 @@ pub struct ExpertTask {
     pub down_scales: Vec<f32>,
     pub dim: usize,
     pub hidden: usize,
+    pub int4_group_size: usize,
 }
 
 /// Result from an expert computation
@@ -195,6 +196,7 @@ fn process_expert_task(task: ExpertTask) -> ExpertResult {
         &local_tmp[..dim],
         hidden,
         dim,
+        task.int4_group_size,
     );
     
     // Up projection
@@ -205,6 +207,7 @@ fn process_expert_task(task: ExpertTask) -> ExpertResult {
         &local_tmp[..dim],
         hidden,
         dim,
+        task.int4_group_size,
     );
     
     // SwiGLU activation
@@ -219,6 +222,7 @@ fn process_expert_task(task: ExpertTask) -> ExpertResult {
         &local_tmp[..hidden],
         dim,
         hidden,
+        task.int4_group_size,
     );
     
     ExpertResult {

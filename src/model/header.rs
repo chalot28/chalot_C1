@@ -20,6 +20,7 @@ pub struct FileHeader {
     pub int4_group_size: u32, // 0 = Int8 only, else group size for Int4
     pub depth_router_layer: u32, // 0 = disabled
     pub max_seq_len: u32,   // 0 = default (512)
+    pub rope_theta: u32,    // RoPE theta × 100 (0 = default 10000, e.g. 100000000 = 1000000.0)
 }
 
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
@@ -55,6 +56,7 @@ impl FileHeader {
             int4_group_size: 0,
             depth_router_layer: 0,
             max_seq_len: 0,
+            rope_theta: 0,
         };
 
         if version >= 2 && data.len() >= HEADER_SIZE {
@@ -63,6 +65,7 @@ impl FileHeader {
             h.int4_group_size = read_u32_le(data, 136);
             h.depth_router_layer = read_u32_le(data, 140);
             h.max_seq_len = read_u32_le(data, 144);
+            h.rope_theta = read_u32_le(data, 148);
         }
         h
     }
@@ -87,6 +90,7 @@ impl FileHeader {
         write_u32_le(buf, 136, self.int4_group_size);
         write_u32_le(buf, 140, self.depth_router_layer);
         write_u32_le(buf, 144, self.max_seq_len);
+        write_u32_le(buf, 148, self.rope_theta);
     }
 
     #[allow(dead_code)]
@@ -117,5 +121,15 @@ impl FileHeader {
     #[allow(dead_code)]
     pub fn has_depth_router(&self) -> bool {
         self.depth_router_layer > 0
+    }
+
+    /// Get rope_theta as f32. Stored as theta×100 in header.
+    /// 0 means default (10000.0).
+    pub fn rope_theta_f32(&self) -> f32 {
+        if self.rope_theta == 0 {
+            10000.0
+        } else {
+            self.rope_theta as f32 / 100.0
+        }
     }
 }
