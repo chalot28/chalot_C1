@@ -36,6 +36,7 @@ impl Tokenizer {
                         new_bytes.extend_from_slice(&tok.vocab[b as usize]);
                     }
                     tok.token_map.insert(new_bytes.clone(), new_id);
+                    tok.vocab_decoded.push(new_bytes.clone());
                     tok.vocab.push(new_bytes);
                     tok.merges.push((a, b));
                 }
@@ -137,6 +138,9 @@ impl Tokenizer {
         // - Printable bytes (33-126, 161-172, 174-255) map to themselves as unicode chars
         // - Non-printable bytes map to unicode chars starting at U+0100
         let mut byte_to_token = [0u32; 256];
+        // Also build the REVERSE mapping: unicode_char → raw_byte_value
+        // This is needed to decode tokens back to proper text
+        let mut unicode_to_byte = std::collections::HashMap::new();
         {
             // Build the GPT-2 bytes_to_unicode table
             let mut printable = Vec::new();
@@ -156,6 +160,9 @@ impl Tokenizer {
                     ch
                 };
 
+                // Store reverse mapping for decode
+                unicode_to_byte.insert(unicode_char, byte_val as u8);
+
                 // Encode the unicode char to UTF-8 and look up in token_map
                 let mut buf = [0u8; 4];
                 let utf8 = unicode_char.encode_utf8(&mut buf);
@@ -173,6 +180,28 @@ impl Tokenizer {
             println!("[tokenizer] Byte-to-token mapping: {}/256 bytes mapped", mapped);
         }
 
+        // Build vocab_decoded: convert GPT-2 unicode representations back to raw bytes.
+        // The vocab entries store GPT-2 byte-to-unicode chars (e.g. Ġ for space, Ċ for newline).
+        // vocab_decoded[id] contains the actual raw bytes that the token represents.
+        let mut vocab_decoded = Vec::with_capacity(vocab.len());
+        for token_bytes in &vocab {
+            let text = String::from_utf8_lossy(token_bytes);
+            let raw_bytes: Vec<u8> = text.chars().flat_map(|c| {
+                if let Some(&byte) = unicode_to_byte.get(&c) {
+                    // GPT-2 unicode char → raw byte value
+                    vec![byte]
+                } else {
+                    // Not a GPT-2 byte char (e.g. special tokens like <|im_end|>)
+                    // Keep as UTF-8 encoded bytes
+                    let mut buf = [0u8; 4];
+                    let s = c.encode_utf8(&mut buf);
+                    s.as_bytes().to_vec()
+                }
+            }).collect();
+            vocab_decoded.push(raw_bytes);
+        }
+        println!("[tokenizer] Built vocab_decoded: {} entries with GPT-2 byte reversal", vocab_decoded.len());
+
         Ok(Tokenizer {
             merges,
             merge_ranks,
@@ -180,6 +209,7 @@ impl Tokenizer {
             vocab,
             token_map,
             byte_to_token,
+            vocab_decoded,
             vocab_size,
             hf_mode: true,
         })

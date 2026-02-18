@@ -4,3 +4,9 @@
 qwen_moe.myai
 
 qwen_moe.mytok 
+
+tiny_best.pt
+tiny_ckpt_ep1.pt  
+tiny_ckpt_ep2.pt
+tiny_ckpt_ep3.pt
+tiny_student.myai

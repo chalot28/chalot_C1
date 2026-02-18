@@ -21,6 +21,10 @@ pub struct Tokenizer {
     /// GPT-2 style byte→token_id table: maps raw byte value to its initial token ID.
     /// Only populated in HF mode.
     pub(crate) byte_to_token: [u32; 256],
+    /// Decoded vocab: raw bytes after reversing GPT-2 byte-to-unicode mapping.
+    /// In HF mode, vocab entries contain GPT-2 unicode representations (e.g. Ġ for space).
+    /// vocab_decoded[id] contains the actual raw bytes that the token represents.
+    pub(crate) vocab_decoded: Vec<Vec<u8>>,
     /// Maximum vocabulary size.
     pub vocab_size: usize,
     /// Whether this tokenizer was loaded from HuggingFace binary vocab.
@@ -48,6 +52,8 @@ impl Tokenizer {
             vocab.push(v);
         }
 
+        let vocab_decoded = vocab.clone();
+
         Tokenizer {
             merges: Vec::new(),
             merge_ranks: HashMap::new(),
@@ -55,6 +61,7 @@ impl Tokenizer {
             vocab,
             token_map,
             byte_to_token: [0u32; 256],
+            vocab_decoded,
             vocab_size,
             hf_mode: false,
         }
@@ -231,7 +238,7 @@ impl Tokenizer {
         let mut bytes = Vec::with_capacity(tokens.len());
         for &t in tokens {
             let id = t as usize;
-            if id < self.vocab.len() {
+            if id < self.vocab_decoded.len() {
                 // In HF mode, all tokens are valid (no special token skipping)
                 if !self.hf_mode {
                     // Skip special tokens in legacy mode
@@ -239,18 +246,19 @@ impl Tokenizer {
                         continue;
                     }
                 }
-                bytes.extend_from_slice(&self.vocab[id]);
+                bytes.extend_from_slice(&self.vocab_decoded[id]);
             }
         }
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
     /// Decode a single token to its string representation.
+    /// In HF mode, reverses GPT-2 byte-to-unicode mapping to get raw text.
     #[allow(dead_code)]
     pub fn decode_token(&self, t: u32) -> String {
         let id = t as usize;
-        if id < self.vocab.len() {
-            String::from_utf8_lossy(&self.vocab[id]).into_owned()
+        if id < self.vocab_decoded.len() {
+            String::from_utf8_lossy(&self.vocab_decoded[id]).into_owned()
         } else {
             format!("<UNK:{}>", t)
         }

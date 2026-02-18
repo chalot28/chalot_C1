@@ -3,6 +3,31 @@
 // =============================================================================
 
 use super::normalization::softmax;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global atomic counter for RNG entropy — ensures unique random values
+/// even when multiple samples happen within the same nanosecond.
+static RNG_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a pseudo-random f32 in [0, 1) using time + atomic counter + hash mixing.
+/// This replaces the broken `subsec_nanos() / u32::MAX` which only produced values in [0, 0.23].
+#[inline]
+fn random_f32() -> f32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos() as u64;
+    let counter = RNG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // SplitMix64-style hash mixing for full [0, 1) distribution
+    let mut h = nanos ^ counter.wrapping_mul(0x9E3779B97F4A7C15);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58476D1CE4E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D049BB133111EB);
+    h ^= h >> 31;
+    // Use upper 32 bits for better quality, normalize to [0, 1)
+    ((h >> 32) as u32 as f32) / (u32::MAX as f32)
+}
 
 /// Greedy argmax over logits. Returns the token id.
 #[inline(always)]
@@ -39,13 +64,7 @@ pub fn sample_top_k(logits: &mut [f32], k: usize, temperature: f32) -> usize {
         *p /= sum;
     }
 
-    // Simple random selection using a basic LCG (no external deps)
-    // In production, use a proper RNG.
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    let r = (seed as f32) / (u32::MAX as f32);
+    let r = random_f32();
 
     let mut cumulative = 0.0f32;
     for (i, &p) in probs.iter().enumerate() {
@@ -92,11 +111,7 @@ pub fn sample_top_p(logits: &mut [f32], p: f32, temperature: f32) -> usize {
         for val in probs.iter_mut() { *val /= sum; }
     }
 
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    let r = (seed as f32) / (u32::MAX as f32);
+    let r = random_f32();
 
     let mut cum = 0.0f32;
     for (i, &prob) in probs.iter().enumerate() {
@@ -137,11 +152,7 @@ pub fn sample_min_p(logits: &mut [f32], min_p: f32, temperature: f32) -> usize {
         for val in probs.iter_mut() { *val /= sum; }
     }
 
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    let r = (seed as f32) / (u32::MAX as f32);
+    let r = random_f32();
 
     let mut cum = 0.0f32;
     for (i, &prob) in probs.iter().enumerate() {

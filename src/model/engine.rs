@@ -745,7 +745,7 @@ impl Engine {
                             let k0 = s.k[base + 2 * i];
                             let k1 = s.k[base + 2 * i + 1];
                             s.k[base + 2 * i] = k0 * cos_t - k1 * sin_t;
-                            s.k[base + 2 * i + 1] = k0 * sin_t + q1 * cos_t;
+                            s.k[base + 2 * i + 1] = k0 * sin_t + k1 * cos_t;
                         }
                     }
                 }
