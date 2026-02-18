@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// A work item for an expert computation
+#[allow(dead_code)]
 pub struct ExpertTask {
     pub expert_id: usize,
     pub input: Vec<f32>,
@@ -31,18 +32,21 @@ pub struct ExpertTask {
 }
 
 /// Result from an expert computation
+#[allow(dead_code)]
 pub struct ExpertResult {
     pub expert_id: usize,
     pub output: Vec<f32>,
 }
 
 /// A job in the queue
+#[allow(dead_code)]
 enum Job {
     Task(ExpertTask),
     Shutdown,
 }
 
 /// Thread pool for MoE expert processing
+#[allow(dead_code)]
 pub struct ExpertThreadPool {
     workers: Vec<Worker>,
     sender: std::sync::mpsc::Sender<Job>,
@@ -52,6 +56,7 @@ pub struct ExpertThreadPool {
 impl ExpertThreadPool {
     /// Create a new thread pool with the specified number of threads.
     /// Typically, use num_cpus::get() or a fraction thereof.
+    #[allow(dead_code)]
     pub fn new(num_threads: usize) -> Self {
         assert!(num_threads > 0);
         
@@ -78,6 +83,7 @@ impl ExpertThreadPool {
     }
     
     /// Submit a task to the pool. Non-blocking.
+    #[allow(dead_code)]
     pub fn submit(&self, task: ExpertTask) -> Result<(), String> {
         self.sender.send(Job::Task(task))
             .map_err(|_| "Failed to send task to thread pool".to_string())
@@ -85,6 +91,7 @@ impl ExpertThreadPool {
     
     /// Collect results. Blocks until all submitted tasks are complete.
     /// Returns results in the order they complete (not submission order).
+    #[allow(dead_code)]
     pub fn collect_results(&self, count: usize) -> Vec<ExpertResult> {
         let mut results = Vec::with_capacity(count);
         let receiver = self.result_receiver.lock().unwrap();
@@ -100,6 +107,7 @@ impl ExpertThreadPool {
     }
     
     /// Get number of worker threads
+    #[allow(dead_code)]
     pub fn num_workers(&self) -> usize {
         self.workers.len()
     }
@@ -122,12 +130,14 @@ impl Drop for ExpertThreadPool {
 }
 
 /// A worker thread in the pool
+#[allow(dead_code)]
 struct Worker {
     id: usize,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
+    #[allow(dead_code)]
     fn new(
         id: usize,
         receiver: Arc<Mutex<std::sync::mpsc::Receiver<Job>>>,
@@ -161,6 +171,7 @@ impl Worker {
 }
 
 /// Process a single expert task
+#[allow(dead_code)]
 fn process_expert_task(task: ExpertTask) -> ExpertResult {
     use crate::tensor::{matmul_int4, swiglu_fused};
     

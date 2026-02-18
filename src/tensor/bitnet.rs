@@ -24,6 +24,7 @@ use std::arch::x86_64::*;
 
 /// Quantize f32 vector to ternary {-1, 0, 1} with AbsMean scaling.
 /// Returns the scale factor.
+#[allow(dead_code)]
 pub fn quantize_f32_to_ternary(input: &[f32], out: &mut [i8]) -> f32 {
     assert_eq!(input.len(), out.len());
     
@@ -49,6 +50,7 @@ pub fn quantize_f32_to_ternary(input: &[f32], out: &mut [i8]) -> f32 {
 /// We pack 5 ternary values per byte using base-3 encoding.
 /// Input: i8 array with values {-1, 0, 1}
 /// Output: packed byte array (length = ceil(input.len() / 5))
+#[allow(dead_code)]
 pub fn pack_ternary(input: &[i8]) -> Vec<u8> {
     let n = input.len();
     let packed_len = (n + 4) / 5; // Ceiling division
@@ -82,6 +84,7 @@ pub fn pack_ternary(input: &[i8]) -> Vec<u8> {
 
 /// Unpack ternary values from compressed format.
 /// Inverse of pack_ternary.
+#[allow(dead_code)]
 pub fn unpack_ternary(packed: &[u8], out: &mut [i8], n: usize) {
     for i in 0..packed.len() {
         let base = i * 5;
@@ -119,6 +122,7 @@ pub fn unpack_ternary(packed: &[u8], out: &mut [i8], n: usize) {
 /// * `x`         — input activation vector [in_dim]
 /// * `out_dim`   — number of output features
 /// * `in_dim`    — number of input features
+#[allow(dead_code)]
 pub fn matmul_ternary(
     out: &mut [f32],
     w_packed: &[u8],
@@ -150,6 +154,7 @@ pub fn matmul_ternary(
 }
 
 /// Scalar implementation of ternary matmul
+#[allow(dead_code)]
 fn matmul_ternary_scalar(
     out: &mut [f32],
     w_packed: &[u8],
@@ -184,6 +189,7 @@ fn matmul_ternary_scalar(
 /// AVX2 SIMD implementation of ternary matmul
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(dead_code)]
 unsafe fn matmul_ternary_avx2(
     out: &mut [f32],
     w_packed: &[u8],
@@ -253,6 +259,7 @@ unsafe fn matmul_ternary_avx2(
 
 /// Quantize activations for BitNet (typically to Int8, but can be ternary too).
 /// For BitNet b1.58, we quantize activations to Int8 for better precision.
+#[allow(dead_code)]
 pub fn quantize_activation_bitnet(input: &[f32], out: &mut [i8]) -> f32 {
     assert_eq!(input.len(), out.len());
     

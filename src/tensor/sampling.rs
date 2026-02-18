@@ -60,6 +60,7 @@ pub fn sample_top_k(logits: &mut [f32], k: usize, temperature: f32) -> usize {
 /// Top-p (nucleus) sampling: sample from the smallest token set whose
 /// cumulative probability exceeds `p`. Superior to fixed top-k for reasoning
 /// because the candidate pool adapts to model confidence.
+#[allow(dead_code)]
 pub fn sample_top_p(logits: &mut [f32], p: f32, temperature: f32) -> usize {
     let n = logits.len();
     if n == 0 { return 0; }
@@ -108,6 +109,7 @@ pub fn sample_top_p(logits: &mut [f32], p: f32, temperature: f32) -> usize {
 /// Min-P sampling: keeps tokens with prob ≥ min_p × max_prob.
 /// Adaptive cutoff that automatically scales with model confidence.
 /// More principled than fixed top-k or top-p for variable-difficulty tasks.
+#[allow(dead_code)]
 pub fn sample_min_p(logits: &mut [f32], min_p: f32, temperature: f32) -> usize {
     let n = logits.len();
     if n == 0 { return 0; }
@@ -151,6 +153,7 @@ pub fn sample_min_p(logits: &mut [f32], min_p: f32, temperature: f32) -> usize {
 
 /// Apply repetition penalty: reduce probability of recently generated tokens.
 /// penalty > 1.0 discourages repetition; typical range: 1.05–1.3
+#[allow(dead_code)]
 pub fn apply_repetition_penalty(logits: &mut [f32], history: &[usize], penalty: f32) {
     for &tok in history {
         if tok < logits.len() {

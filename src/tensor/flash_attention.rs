@@ -21,6 +21,7 @@
 
 /// Tile size for Q, K, V matrices (tuned for L1 cache ~32KB)
 /// A 64×64 f32 tile = 16KB, leaves room for other data
+#[allow(dead_code)]
 const TILE_SIZE: usize = 64;
 
 /// Flash Attention: tiled multi-head attention computation
@@ -34,6 +35,7 @@ const TILE_SIZE: usize = 64;
 /// * `n_heads` - Number of attention heads
 /// * `seq_len` - Sequence length (current position + 1)
 /// * `head_dim` - Dimension per head
+#[allow(dead_code)]
 pub fn flash_attention_forward(
     q: &[f32],
     k: &[f32],
@@ -65,6 +67,7 @@ pub fn flash_attention_forward(
 }
 
 /// Flash attention for a single head (tiled implementation)
+#[allow(dead_code)]
 fn flash_attention_single_head(
     q: &[f32],
     k: &[f32],
@@ -179,6 +182,7 @@ fn flash_attention_single_head(
 }
 
 /// Flash attention with logit capping (for stability in deep networks)
+#[allow(dead_code)]
 pub fn flash_attention_forward_capped(
     q: &[f32],
     k: &[f32],

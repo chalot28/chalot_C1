@@ -112,6 +112,7 @@ impl Tokenizer {
     // -- Decoding -----------------------------------------------------------
 
     /// Decode token IDs → String.
+    #[allow(dead_code)]
     pub fn decode(&self, tokens: &[u32]) -> String {
         let mut bytes = Vec::with_capacity(tokens.len());
         for &t in tokens {

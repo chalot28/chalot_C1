@@ -123,6 +123,7 @@ impl SparseLoadStats {
         1.0 - (self.experts_accessed as f64 / self.total_expert_blocks as f64)
     }
 
+    #[allow(dead_code)]
     pub fn avg_layers_used(&self) -> f64 {
         if self.total_forwards == 0 {
             return 0.0;

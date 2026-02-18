@@ -31,11 +31,13 @@ pub struct OptimizedTokenizer {
     /// Lower priority = earlier merge (higher precedence)
     pub merge_table: HashMap<(u32, u32), (u32, usize)>,
     /// Vocabulary size
+    #[allow(dead_code)]
     pub vocab_size: usize,
 }
 
 /// Pair with frequency for heap-based merge selection
 #[derive(Debug, Clone, Eq, PartialEq)]
+#[allow(dead_code)]
 struct PairFreq {
     pair: (u32, u32),
     freq: usize,
@@ -55,6 +57,7 @@ impl PartialOrd for PairFreq {
 
 impl OptimizedTokenizer {
     /// Create new tokenizer
+    #[allow(dead_code)]
     pub fn new(vocab_size: usize) -> Self {
         let mut vocab = Vec::with_capacity(vocab_size.min(512));
         let mut token_map = HashMap::new();
@@ -83,6 +86,7 @@ impl OptimizedTokenizer {
     }
     
     /// Train BPE with optimized heap-based pair selection
+    #[allow(dead_code)]
     pub fn train_optimized(&mut self, corpus: &str, num_merges: usize) {
         let mut tokens: Vec<u32> = corpus.bytes().map(|b| BYTE_OFFSET + b as u32).collect();
         
@@ -123,6 +127,7 @@ impl OptimizedTokenizer {
     }
     
     /// Optimized pair counting with SIMD-friendly iteration
+    #[allow(dead_code)]
     fn count_pairs_optimized(&self, tokens: &[u32]) -> Vec<((u32, u32), usize)> {
         let mut pair_counts: HashMap<(u32, u32), usize> = HashMap::new();
         
@@ -147,6 +152,7 @@ impl OptimizedTokenizer {
     }
     
     /// Apply merge with minimal allocations
+    #[allow(dead_code)]
     fn apply_merge_optimized(&self, tokens: &mut Vec<u32>, a: u32, b: u32, new_id: u32) {
         let mut write_idx = 0;
         let mut read_idx = 0;
@@ -166,6 +172,7 @@ impl OptimizedTokenizer {
     }
     
     /// Concatenate token sequences efficiently
+    #[allow(dead_code)]
     fn concatenate_tokens(&self, a: u32, b: u32) -> Vec<u8> {
         let mut result = Vec::new();
         
@@ -180,6 +187,7 @@ impl OptimizedTokenizer {
     }
     
     /// Optimized encoding with merge table lookup
+    #[allow(dead_code)]
     pub fn encode_optimized(&self, text: &str) -> Vec<u32> {
         if text.is_empty() {
             return Vec::new();
@@ -198,6 +206,7 @@ impl OptimizedTokenizer {
     }
     
     /// Optimized chunk splitting
+    #[allow(dead_code)]
     fn split_chunks_optimized<'a>(&self, text: &'a str) -> Vec<&'a str> {
         let mut chunks = Vec::new();
         let mut start = 0;
@@ -230,6 +239,7 @@ impl OptimizedTokenizer {
     }
     
     /// Encode single chunk with merge table fast path
+    #[allow(dead_code)]
     fn encode_chunk_optimized(&self, text: &str) -> Vec<u32> {
         let mut tokens: Vec<u32> = text.bytes().map(|b| BYTE_OFFSET + b as u32).collect();
         
@@ -265,6 +275,7 @@ impl OptimizedTokenizer {
     }
     
     /// Decode tokens to string
+    #[allow(dead_code)]
     pub fn decode(&self, tokens: &[u32]) -> String {
         let mut bytes = Vec::with_capacity(tokens.len() * 2);
         
@@ -283,6 +294,7 @@ impl OptimizedTokenizer {
     }
     
     /// Get tokenizer statistics
+    #[allow(dead_code)]
     pub fn stats(&self) -> TokenizerStats {
         TokenizerStats {
             vocab_size: self.vocab.len(),
@@ -292,6 +304,7 @@ impl OptimizedTokenizer {
     }
     
     /// Estimate memory usage
+    #[allow(dead_code)]
     fn estimate_memory(&self) -> usize {
         let vocab_mem: usize = self.vocab.iter().map(|v| v.len() + 24).sum();
         let merge_mem = self.merges.len() * 8;
@@ -303,13 +316,16 @@ impl OptimizedTokenizer {
 }
 
 /// Tokenizer statistics
+#[allow(dead_code)]
 pub struct TokenizerStats {
+    #[allow(dead_code)]
     pub vocab_size: usize,
     pub num_merges: usize,
     pub memory_bytes: usize,
 }
 
 impl TokenizerStats {
+    #[allow(dead_code)]
     pub fn memory_mb(&self) -> f64 {
         self.memory_bytes as f64 / 1e6
     }

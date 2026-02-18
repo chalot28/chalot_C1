@@ -26,6 +26,7 @@ pub struct ExpertWeightIndex {
 pub struct LayerWeightIndex {
     // RMS norm (attention): [dim] f32
     pub rms_attn_offset: usize,
+    #[allow(dead_code)]
     pub rms_bytes: usize,
 
     // Attention QKV: [3*dim*dim] Int8 + [3*dim] f32 scales

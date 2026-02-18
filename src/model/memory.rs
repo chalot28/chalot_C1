@@ -15,22 +15,29 @@
 use std::collections::{HashMap, VecDeque};
 
 /// Kích thước 1 trang (số token)
+#[allow(dead_code)]
 const PAGE_SIZE: usize = 256;
 
 /// Số trang tối đa trong RAM (256 token × 16 pages = 4K context)
+#[allow(dead_code)]
 const MAX_PAGES_IN_RAM: usize = 16;
 
 /// Một trang KV cache đã được lượng tử hóa Int8
 #[derive(Clone)]
 pub struct KVPage {
     /// Keys: [page_size, dim] → Int8
+    #[allow(dead_code)]
     pub k: Vec<i8>,
     /// Values: [page_size, dim] → Int8
+    #[allow(dead_code)]
     pub v: Vec<i8>,
     /// Scale factors cho dequantization
+    #[allow(dead_code)]
     pub k_scale: Vec<f32>,
+    #[allow(dead_code)]
     pub v_scale: Vec<f32>,
     /// Thứ tự truy cập (cho LRU)
+    #[allow(dead_code)]
     pub last_access: u64,
 }
 
@@ -47,6 +54,7 @@ impl KVPage {
     }
 
     /// Quantize Float32 → Int8 (per-row scaling)
+    #[allow(dead_code)]
     pub fn quantize_row(row: &[f32], out: &mut [i8], scale: &mut f32) {
         let max_val = row.iter().map(|x| x.abs()).fold(0.0, f32::max);
         *scale = if max_val > 0.0 { max_val / 127.0 } else { 1.0 };
@@ -57,6 +65,7 @@ impl KVPage {
     }
 
     /// Dequantize Int8 → Float32
+    #[allow(dead_code)]
     pub fn dequantize_row(row: &[i8], out: &mut [f32], scale: f32) {
         for (i, &val) in row.iter().enumerate() {
             out[i] = val as f32 * scale;
@@ -64,6 +73,7 @@ impl KVPage {
     }
 
     /// Ghi 1 token vào trang (tại vị trí offset)
+    #[allow(dead_code)]
     pub fn write_token(&mut self, offset: usize, k: &[f32], v: &[f32], timestamp: u64) {
         let dim = k.len();
         let k_start = offset * dim;
@@ -75,6 +85,7 @@ impl KVPage {
     }
 
     /// Đọc 1 token từ trang
+    #[allow(dead_code)]
     pub fn read_token(&self, offset: usize, k_out: &mut [f32], v_out: &mut [f32]) {
         let dim = k_out.len();
         let k_start = offset * dim;
@@ -90,20 +101,24 @@ pub struct PagedKVCache {
     /// Kích thước embedding
     pub dim: usize,
     /// Số layer
+    #[allow(dead_code)]
     pub n_layers: usize,
     /// Bộ nhớ trang: [layer_id][page_id] → KVPage
     pub pages: Vec<HashMap<usize, KVPage>>,
     /// Hàng đợi LRU: theo dõi thứ tự truy cập
+    #[allow(dead_code)]
     pub lru_queue: VecDeque<(usize, usize)>, // (layer_id, page_id)
     /// Bộ đếm timestamp
+    #[allow(dead_code)]
     pub timestamp: u64,
 }
 
 impl PagedKVCache {
     /// Khởi tạo cache trống
-    pub fn new(dim: usize, n_layers: usize) -> Self {
+    /// kv_dim: Kích thước vector K/V (với GQA, kv_dim = head_dim * n_kv_heads)
+    pub fn new(kv_dim: usize, n_layers: usize) -> Self {
         Self {
-            dim,
+            dim: kv_dim,
             n_layers,
             pages: (0..n_layers).map(|_| HashMap::new()).collect(),
             lru_queue: VecDeque::new(),
@@ -119,6 +134,7 @@ impl PagedKVCache {
     }
 
     /// Evict trang cũ nhất nếu RAM đầy (LRU policy)
+    #[allow(dead_code)]
     fn evict_if_full(&mut self) {
         let total_pages: usize = self.pages.iter().map(|m| m.len()).sum();
         if total_pages >= MAX_PAGES_IN_RAM * self.n_layers {
@@ -129,6 +145,7 @@ impl PagedKVCache {
     }
 
     /// Lấy hoặc tạo trang (auto-eviction)
+    #[allow(dead_code)]
     fn get_or_create_page(&mut self, layer_id: usize, page_id: usize) -> &mut KVPage {
         self.evict_if_full();
         self.timestamp += 1;
@@ -143,6 +160,7 @@ impl PagedKVCache {
     }
 
     /// Ghi KV cho 1 token vào cache
+    #[allow(dead_code)]
     pub fn write(&mut self, layer_id: usize, pos: usize, k: &[f32], v: &[f32]) {
         let page_id = pos / PAGE_SIZE;
         let offset = pos % PAGE_SIZE;
@@ -153,6 +171,7 @@ impl PagedKVCache {
     }
 
     /// Đọc KV từ cache (trả về None nếu trang không tồn tại)
+    #[allow(dead_code)]
     pub fn read(&self, layer_id: usize, pos: usize, k_out: &mut [f32], v_out: &mut [f32]) -> bool {
         let page_id = pos / PAGE_SIZE;
         let offset = pos % PAGE_SIZE;
@@ -166,6 +185,7 @@ impl PagedKVCache {
     }
 
     /// Xóa toàn bộ cache (reset conversation)
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         for page_map in &mut self.pages {
             page_map.clear();
@@ -205,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_paging() {
-        let mut cache = PagedKVCache::new(64, 4);
+        let mut cache = PagedKVCache::new(64, 4); // kv_dim = 64
         let k = vec![1.0; 64];
         let v = vec![2.0; 64];
 
@@ -224,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_lru_eviction() {
-        let mut cache = PagedKVCache::new(32, 1);
+        let mut cache = PagedKVCache::new(32, 1); // kv_dim = 32
         let k = vec![1.0; 32];
         let v = vec![2.0; 32];
 

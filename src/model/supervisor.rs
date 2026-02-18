@@ -18,6 +18,14 @@
 
 use std::f32;
 
+/// Hành động đề xuất bởi Supervisor
+#[derive(Debug, PartialEq)]
+pub enum SupervisorAction {
+    Continue,       // Tự tin, tiếp tục sinh token
+    SwitchToFact,   // Hơi không chắc, chuyển sang vùng não Fact
+    RAGSearch,      // [NEW] Ảo giác nặng -> Kích hoạt Crawler/RAG
+}
+
 /// Cấu trúc Supervisor (Quality Control Network)
 pub struct Supervisor {
     /// Trọng số layer 1: [dim, 64]
@@ -54,6 +62,7 @@ impl Supervisor {
     }
 
     /// Load từ file (binary format: [w1_bytes][w2_bytes])
+    #[allow(dead_code)]
     pub fn load(path: &str, dim: usize, threshold: f32) -> Result<Self, String> {
         let data = std::fs::read(path).map_err(|e| format!("load supervisor: {e}"))?;
 
@@ -83,6 +92,7 @@ impl Supervisor {
     }
 
     /// Save ra file
+    #[allow(dead_code)]
     pub fn save(&self, path: &str) -> Result<(), String> {
         let mut buffer = Vec::new();
 
@@ -130,7 +140,7 @@ impl Supervisor {
     }
 
     /// Kiểm tra có đang ảo giác không (main API)
-    pub fn is_hallucinating(&self, hidden_state: &[f32]) -> bool {
+    pub fn check_status(&self, hidden_state: &[f32]) -> SupervisorAction {
         // 1. Tính hallucination score từ MLP
         let mlp_score = self.forward(hidden_state);
 
@@ -141,7 +151,13 @@ impl Supervisor {
         // 3. Kết hợp các tín hiệu
         let combined_score = mlp_score * 0.6 + entropy * 0.2 + variance * 0.2;
 
-        combined_score > self.threshold
+        if combined_score > 0.85 {
+            SupervisorAction::RAGSearch // Rất hỗn loạn -> Cần dữ liệu ngoài
+        } else if combined_score > self.threshold {
+            SupervisorAction::SwitchToFact // Hơi nghi ngờ -> Dùng vùng não Fact
+        } else {
+            SupervisorAction::Continue
+        }
     }
 
     /// Tính entropy của embedding (độ hỗn loạn)
@@ -191,11 +207,13 @@ impl Supervisor {
     }
 
     /// Tính confidence score (ngược lại của hallucination)
+    #[allow(dead_code)]
     pub fn confidence_score(&self, hidden_state: &[f32]) -> f32 {
         1.0 - self.forward(hidden_state)
     }
 
     /// Cập nhật threshold động (adaptive)
+    #[allow(dead_code)]
     pub fn set_threshold(&mut self, new_threshold: f32) {
         self.threshold = new_threshold.clamp(0.0, 1.0);
     }
@@ -206,6 +224,7 @@ impl Supervisor {
 // =============================================================================
 
 /// Phát hiện attention collapse (tất cả heads focus vào 1 token)
+#[allow(dead_code)]
 pub fn detect_attention_collapse(attn_weights: &[f32], n_heads: usize, seq_len: usize) -> bool {
     // attn_weights: [n_heads, seq_len]
     if attn_weights.len() != n_heads * seq_len {
@@ -254,7 +273,7 @@ mod tests {
 
         // Normal case: low entropy
         let normal = vec![0.1; 64];
-        assert!(!sup.is_hallucinating(&normal));
+        assert_eq!(sup.check_status(&normal), SupervisorAction::Continue);
 
         // Hallucination case: high variance
         let mut chaotic = vec![0.0; 64];
@@ -262,7 +281,7 @@ mod tests {
             *v = (i as f32 * 0.314).sin() * 5.0; // High variance
         }
         // Có thể hoặc không hallucinating tùy ngưỡng (test logic only)
-        let _ = sup.is_hallucinating(&chaotic);
+        let _ = sup.check_status(&chaotic);
     }
 
     #[test]

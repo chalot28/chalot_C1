@@ -22,6 +22,7 @@
 use memmap2::Mmap;
 
 /// Prefetch hint for sequential access pattern
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub fn prefetch_sequential(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
@@ -47,6 +48,7 @@ pub fn prefetch_sequential(mmap: &Mmap, offset: usize, len: usize) -> Result<(),
 }
 
 /// Prefetch hint for sequential access pattern (macOS)
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 pub fn prefetch_sequential(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
     if offset + len > mmap.len() {
@@ -70,6 +72,7 @@ pub fn prefetch_sequential(mmap: &Mmap, offset: usize, len: usize) -> Result<(),
 }
 
 /// Prefetch hint for Windows
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 pub fn prefetch_sequential(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
     // Windows prefetching using VirtualLock
@@ -99,6 +102,7 @@ pub fn prefetch_sequential(mmap: &Mmap, offset: usize, len: usize) -> Result<(),
 }
 
 /// Fallback for unsupported platforms (no-op)
+#[allow(dead_code)]
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn prefetch_sequential(_mmap: &Mmap, _offset: usize, _len: usize) -> Result<(), String> {
     // No-op on unsupported platforms
@@ -106,6 +110,7 @@ pub fn prefetch_sequential(_mmap: &Mmap, _offset: usize, _len: usize) -> Result<
 }
 
 /// Prefetch a specific expert's weights before computation
+#[allow(dead_code)]
 pub fn prefetch_expert_weights(
     mmap: &Mmap,
     gate_up_offset: usize,
@@ -123,6 +128,7 @@ pub fn prefetch_expert_weights(
 }
 
 /// Prefetch attention weights for a layer
+#[allow(dead_code)]
 pub fn prefetch_attention_weights(
     mmap: &Mmap,
     qkv_offset: usize,
@@ -141,6 +147,7 @@ pub fn prefetch_attention_weights(
 
 /// Mark memory region as "done" (won't be needed soon)
 /// This allows OS to evict pages sooner if memory is tight
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub fn mark_done(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
     if offset + len > mmap.len() {
@@ -159,6 +166,7 @@ pub fn mark_done(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
 }
 
 /// Mark memory region as "done" (macOS)
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 pub fn mark_done(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
     if offset + len > mmap.len() {
@@ -177,6 +185,7 @@ pub fn mark_done(mmap: &Mmap, offset: usize, len: usize) -> Result<(), String> {
 }
 
 /// Mark memory region as "done" (Windows - no-op)
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 pub fn mark_done(_mmap: &Mmap, _offset: usize, _len: usize) -> Result<(), String> {
     // Windows doesn't have a direct equivalent
@@ -185,12 +194,14 @@ pub fn mark_done(_mmap: &Mmap, _offset: usize, _len: usize) -> Result<(), String
 }
 
 /// Mark memory region as "done" (fallback)
+#[allow(dead_code)]
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn mark_done(_mmap: &Mmap, _offset: usize, _len: usize) -> Result<(), String> {
     Ok(())
 }
 
 /// Prefetch strategy for predictive loading
+#[allow(dead_code)]
 pub struct PrefetchStrategy {
     /// Enable prefetching
     pub enabled: bool,
@@ -209,6 +220,7 @@ impl Default for PrefetchStrategy {
 
 impl PrefetchStrategy {
     /// Prefetch top-K experts for a layer
+    #[allow(dead_code)]
     pub fn prefetch_top_experts(
         &self,
         mmap: &Mmap,

@@ -483,11 +483,14 @@ fn default_config() -> ModelConfig {
         vocab_size: 32000,
         max_seq_len: MAX_SEQ_LEN,
         is_quantized: true,
+        is_bitnet: false,
+        n_kv_heads: 8,  // Same as n_heads for MHA
         n_experts: 8,  // 8 experts = 2× specialization capacity, same runtime compute (top-2)
         top_k: 2,
         int4_group_size: 64,
         depth_router_layer: DEPTH_ROUTER_AFTER_LAYER,
         tri_layer_mode: false,  // NLLM tri-layer dense mode (disabled by default)
+        speculative_steps: 0,
     }
 }
 

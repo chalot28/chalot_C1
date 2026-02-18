@@ -127,6 +127,7 @@ pub fn pack_int4(lo: i8, hi: i8) -> u8 {
 
 /// Quantise f32 → Int4 with per-group scales.
 /// `out` length = ceil(input.len()/2), `scales` length = ceil(input.len()/GROUP).
+#[allow(dead_code)]
 pub fn quantize_f32_to_i4(input: &[f32], out: &mut [u8], scales: &mut [f32]) {
     let n = input.len();
     let n_groups = (n + INT4_GROUP_SIZE - 1) / INT4_GROUP_SIZE;

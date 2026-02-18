@@ -19,6 +19,7 @@ mod tests;
 // Re-export public API
 #[allow(unused_imports)]
 pub use view::{TensorView, bytes_as_f32, bytes_as_f32_mut};
+#[allow(unused_imports)]
 pub use quantization::{
     INT4_GROUP_SIZE,
     quantize_f32_to_i8,
@@ -27,6 +28,7 @@ pub use quantization::{
     unpack_int4,
 };
 pub use matmul::{matmul_int8, matmul_int4};
+#[allow(unused_imports)]
 pub use bitnet::{
     quantize_f32_to_ternary,
     pack_ternary,
@@ -34,10 +36,14 @@ pub use bitnet::{
     matmul_ternary,
     quantize_activation_bitnet,
 };
+#[allow(unused_imports)]
 pub use activations::{sigmoid, relu, silu, gelu, swiglu_fused, logit_soft_cap};
+#[allow(unused_imports)]
 pub use flash_attention::{flash_attention_forward, flash_attention_forward_capped};
 pub use normalization::{rmsnorm, softmax, softmax_top_k};
+#[allow(unused_imports)]
 pub use rope::apply_rope;
+#[allow(unused_imports)]
 pub use sampling::{
     sample_argmax,
     sample_top_k,

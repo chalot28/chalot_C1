@@ -30,6 +30,7 @@ pub enum RegionType {
 }
 
 impl RegionType {
+    #[allow(dead_code)]
     pub fn from_id(id: usize) -> Self {
         match id {
             0 => Self::ShallowReflex,
@@ -39,6 +40,7 @@ impl RegionType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
             Self::ShallowReflex => "Shallow",
@@ -94,6 +96,7 @@ pub struct BrainMap {
     /// Danh sách các vùng não
     pub regions: Vec<BrainRegion>,
     /// Memory-mapped file chứa tất cả dữ liệu
+    #[allow(dead_code)]
     pub data_source: Mmap,
     /// Vùng đang được active (cho stats)
     pub active_region: Option<usize>,
@@ -210,6 +213,7 @@ impl BrainMap {
     }
 
     /// Tạo file .brain mới (dummy data cho testing)
+    #[allow(dead_code)]
     pub fn create_dummy(path: &Path, configs: &[(RegionType, usize, usize)]) -> Result<(), String> {
         let mut file = File::create(path).map_err(|e| format!("create brain: {e}"))?;
 
@@ -256,6 +260,7 @@ impl BrainMap {
     }
 
     /// Lấy dữ liệu weights của 1 vùng não (zero-copy slice)
+    #[allow(dead_code)]
     pub fn get_weights(&mut self, region_id: usize) -> Option<&[u8]> {
         if region_id >= self.regions.len() {
             return None;
@@ -274,11 +279,13 @@ impl BrainMap {
         Some(&self.data_source[start..end])
     }
 
+    #[allow(dead_code)]
     /// Lấy metadata của vùng não
     pub fn get_region(&self, region_id: usize) -> Option<&BrainRegion> {
         self.regions.get(region_id)
     }
 
+    #[allow(dead_code)]
     /// Tìm vùng não theo loại
     pub fn find_region_by_type(&self, region_type: RegionType) -> Option<&BrainRegion> {
         self.regions.iter().find(|r| r.region_type == region_type)
@@ -381,6 +388,7 @@ impl BrainMap {
 // =============================================================================
 
 /// Cast byte slice thành Float32 slice (unsafe nhưng zero-copy)
+#[allow(dead_code)]
 pub fn bytes_as_f32_slice(bytes: &[u8]) -> &[f32] {
     let ptr = bytes.as_ptr() as *const f32;
     let len = bytes.len() / 4;
@@ -390,6 +398,7 @@ pub fn bytes_as_f32_slice(bytes: &[u8]) -> &[f32] {
 /// Trích xuất 1 matrix từ vùng não
 /// offset: vị trí bắt đầu (số Float32)
 /// rows, cols: kích thước matrix
+#[allow(dead_code)]
 pub fn extract_matrix<'a>(
     region_weights: &'a [u8],
     offset: usize,

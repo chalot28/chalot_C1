@@ -26,6 +26,7 @@ use super::engine::Engine;
 use super::brain_map::RegionType;
 
 /// Configuration for speculative decoding
+#[allow(dead_code)]
 pub struct SpeculativeConfig {
     /// Number of tokens to generate speculatively
     pub num_candidates: usize,
@@ -46,6 +47,7 @@ impl Default for SpeculativeConfig {
 }
 
 /// Speculative decoding result
+#[allow(dead_code)]
 pub struct SpeculativeResult {
     /// Accepted tokens from speculation
     pub accepted_tokens: Vec<usize>,
@@ -75,6 +77,7 @@ impl SpeculativeResult {
 }
 
 /// Speculative decoding engine
+#[allow(dead_code)]
 pub struct SpeculativeDecoder {
     config: SpeculativeConfig,
     /// Statistics
@@ -83,6 +86,7 @@ pub struct SpeculativeDecoder {
 }
 
 impl SpeculativeDecoder {
+    #[allow(dead_code)]
     pub fn new(config: SpeculativeConfig) -> Self {
         Self {
             config,
@@ -92,6 +96,7 @@ impl SpeculativeDecoder {
     }
     
     /// Generate tokens using speculative decoding
+    #[allow(dead_code)]
     pub fn generate_speculative(
         &mut self,
         engine: &mut Engine,
@@ -149,6 +154,7 @@ impl SpeculativeDecoder {
     }
     
     /// Generate candidates using shallow (fast) model
+    #[allow(dead_code)]
     fn generate_shallow_candidates(
         &self,
         engine: &mut Engine,
@@ -190,6 +196,7 @@ impl SpeculativeDecoder {
     }
     
     /// Verify candidates using deep (accurate) model in ONE forward pass
+    #[allow(dead_code)]
     fn verify_with_deep(
         &self,
         engine: &mut Engine,
@@ -242,6 +249,7 @@ impl SpeculativeDecoder {
     }
     
     /// Fallback: standard generation (no speculation)
+    #[allow(dead_code)]
     fn generate_standard(
         &self,
         engine: &mut Engine,
@@ -262,6 +270,7 @@ impl SpeculativeDecoder {
     }
     
     /// Get overall acceptance rate
+    #[allow(dead_code)]
     pub fn acceptance_rate(&self) -> f32 {
         if self.total_generated == 0 {
             0.0
@@ -271,6 +280,7 @@ impl SpeculativeDecoder {
     }
     
     /// Get speedup factor (theoretical)
+    #[allow(dead_code)]
     pub fn speedup_factor(&self) -> f32 {
         if self.total_generated == 0 {
             1.0

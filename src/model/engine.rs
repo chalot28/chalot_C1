@@ -34,10 +34,15 @@ pub struct Engine {
     pub current_head: Option<TaskHead>,
     
     // NLLM Components (Optional - only if NLLM mode enabled)
+    #[allow(dead_code)]
     pub nllm_instinct: Option<InstinctCore>,
+    #[allow(dead_code)]
     pub nllm_supervisor: Option<Supervisor>,
+    #[allow(dead_code)]
     pub nllm_brain: Option<BrainMap>,
+    #[allow(dead_code)]
     pub nllm_kv_cache: Option<PagedKVCache>,
+    #[allow(dead_code)]
     pub nllm_context_tokens: Vec<usize>,
 }
 
@@ -462,6 +467,7 @@ impl Engine {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Enable NLLM mode with instinct core, supervisor, and brain map
+    #[allow(dead_code)]
     pub fn enable_nllm(
         &mut self,
         instinct_path: &Path,
@@ -494,6 +500,7 @@ impl Engine {
     /// - Instinct-based brain region routing
     /// - Supervisor hallucination detection
     /// - Dense inter-layer connections (3-layer blocks)
+    #[allow(dead_code)]
     pub fn forward_nllm(&mut self, token: usize, pos: usize) -> usize {
         // Fallback to standard forward if NLLM not enabled
         if self.nllm_instinct.is_none() {
@@ -552,8 +559,9 @@ impl Engine {
 
                 // SUPERVISOR CHECK: Phát hiện ảo giác
                 if let Some(supervisor) = &self.nllm_supervisor {
-                    if supervisor.is_hallucinating(&s.x) {
-                        println!("[nllm] Supervisor detected hallucination at layer {}", layer);
+                    let action = supervisor.check_status(&s.x);
+                    if action != crate::model::supervisor::SupervisorAction::Continue {
+                        println!("[nllm] Supervisor detected issue at layer {}: {:?}", layer, action);
                         // In a full implementation, would switch to Fact region here
                     }
                 }
@@ -710,6 +718,7 @@ impl Engine {
     }
 
     /// Get NLLM statistics
+    #[allow(dead_code)]
     pub fn nllm_stats(&self) -> String {
         let mut stats = String::from("[NLLM Stats]\n");
         

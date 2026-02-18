@@ -17,6 +17,10 @@ pub struct ModelConfig {
     pub vocab_size: usize,
     pub max_seq_len: usize,
     pub is_quantized: bool,
+    #[allow(dead_code)]
+    pub is_bitnet: bool,      // [NEW] BitNet b1.58 mode (-1, 0, 1)
+    #[allow(dead_code)]
+    pub n_kv_heads: usize,    // [NEW] Group Query Attention (GQA)
     // MoE
     pub n_experts: usize,
     pub top_k: usize,
@@ -26,6 +30,8 @@ pub struct ModelConfig {
     pub depth_router_layer: usize,
     // Architecture
     pub tri_layer_mode: bool,
+    #[allow(dead_code)]
+    pub speculative_steps: usize, // [NEW] Số token dự đoán trước (Drafting)
 }
 
 impl ModelConfig {
@@ -36,6 +42,8 @@ impl ModelConfig {
         let top_k = if h.top_k >= 1 { h.top_k as usize } else { n_experts.min(2) };
         let group = if h.int4_group_size > 0 { h.int4_group_size as usize } else { INT4_GROUP_SIZE };
         let max_seq = if h.max_seq_len > 0 { h.max_seq_len as usize } else { MAX_SEQ_LEN };
+        // Mặc định n_kv_heads = n_heads nếu không được quy định (Multi-head Attention truyền thống)
+        let n_kv_heads = n_heads; 
 
         Self {
             dim,
@@ -43,19 +51,28 @@ impl ModelConfig {
             n_layers: h.n_layers as usize,
             n_heads,
             head_dim: dim / n_heads,
+            n_kv_heads,
             vocab_size: h.vocab_size as usize,
             max_seq_len: max_seq,
             is_quantized: (h.flags & 1) != 0,
+            is_bitnet: (h.flags & 0b1000) != 0, // Giả sử bit 3 là cờ BitNet
             n_experts,
             top_k: top_k.min(n_experts),
             int4_group_size: group,
             depth_router_layer: h.depth_router_layer as usize,
             tri_layer_mode: false, // Mặc định tắt cho các model cũ
+            speculative_steps: 0,
         }
     }
 
     pub fn is_moe(&self) -> bool {
         self.n_experts >= 2
+    }
+
+    /// Kiểm tra xem có dùng GQA không
+    #[allow(dead_code)]
+    pub fn is_gqa(&self) -> bool {
+        self.n_kv_heads < self.n_heads
     }
 
     /// Total parameter count (approximate).
@@ -82,18 +99,21 @@ impl ModelConfig {
         embed + n_layers * per_layer + output + depth_router + dim
     }
 
-    /// Cấu hình tối ưu cho 100MB RAM theo kiến trúc "3 Tầng - Ống dẫn"
+    /// Cấu hình tối ưu cho 100MB RAM: BitNet b1.58 + Tri-Layer Dense
     #[allow(dead_code)]
-    pub fn mobile_tri_layer_config() -> Self {
+    pub fn mobile_bitnet_config() -> Self {
         Self {
             dim: 192,           // Mỏng lại (Gốc 512) -> Tiết kiệm RAM KV Cache cực lớn
             hidden_dim: 512,    // Hidden cũng nhỏ lại
             n_layers: 24,       // Tăng số lớp (Gốc 12) -> Suy luận sâu hơn
             n_heads: 6,
+            n_kv_heads: 2,      // GQA: 3 query heads share 1 KV head -> Giảm 3x KV Cache
             head_dim: 32,
             vocab_size: 32000,  // Ví dụ
             max_seq_len: 2048,
+            is_bitnet: true,    // [OPTIMIZATION] Ternary weights (-1, 0, 1)
             tri_layer_mode: true, // Cờ bật chế độ 3 tầng
+            speculative_steps: 3, // Dự đoán trước 3 token bằng ShallowReflex
             ..unsafe { std::mem::zeroed() } // Hack để điền các field còn lại (hoặc điền đầy đủ)
         }
     }
@@ -108,15 +128,18 @@ impl ModelConfig {
             hidden_dim: 4864,      // FFN intermediate size
             n_layers: 24,          // Qwen2.5-0.5B có 24 transformer blocks
             n_heads: 14,           // 14 attention heads
+            n_kv_heads: 2,         // [OPTIMIZATION] Qwen2.5 dùng GQA (14/2 = 7x reduction in KV Cache)
             head_dim: 64,          // 896 / 14 = 64
             vocab_size: 151936,    // Qwen tokenizer vocab size
             max_seq_len: 2048,     // Giới hạn context cho mobile
             is_quantized: true,    // Int8 attention + Int4 experts
+            is_bitnet: false,      // Qwen gốc không phải BitNet (trừ khi fine-tune lại)
             n_experts: 8,          // Up-cycle: Nhân bản FFN thành 8 experts
             top_k: 2,              // Chỉ kích hoạt 2 experts/token
             int4_group_size: 32,   // Group size cho Int4 quantization
             depth_router_layer: 8, // Adaptive depth sau layer 8
             tri_layer_mode: true,  // Bật chế độ Brain Map 3 tầng
+            speculative_steps: 2,  // Enable speculative decoding
         }
     }
 

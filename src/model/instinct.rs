@@ -33,6 +33,7 @@ pub enum BrainRegion {
 }
 
 impl BrainRegion {
+    #[allow(dead_code)]
     pub fn from_id(id: usize) -> Self {
         match id {
             0 => Self::ShallowReflex,
@@ -42,6 +43,7 @@ impl BrainRegion {
         }
     }
 
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
             Self::ShallowReflex => "Shallow",
@@ -56,10 +58,12 @@ pub struct InstinctCore {
     /// Memory-mapped weights (1M Float32)
     weights: Mmap,
     /// Read-only flag
+    #[allow(dead_code)]
     read_only: bool,
 }
 
 /// Bộ nhớ Instinct (Mutable mode - cho training)
+#[allow(dead_code)]
 pub struct InstinctCoreMut {
     /// Mutable memory-mapped weights
     weights_mut: MmapMut,
@@ -87,6 +91,7 @@ impl InstinctCore {
     }
 
     /// Tạo file .bin mới với weights khởi tạo ngẫu nhiên
+    #[allow(dead_code)]
     pub fn create(path: &Path) -> Result<(), String> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -170,6 +175,7 @@ impl InstinctCore {
 
 impl InstinctCoreMut {
     /// Mở file .bin ở chế độ mutable (cho training)
+    #[allow(dead_code)]
     pub fn load_mut(path: &Path) -> Result<Self, String> {
         let file = OpenOptions::new()
             .read(true)
@@ -192,6 +198,7 @@ impl InstinctCoreMut {
     }
 
     /// Đọc trọng số
+    #[allow(dead_code)]
     fn get_weight(&self, idx: usize) -> f32 {
         let offset = idx * 4;
         f32::from_le_bytes([
@@ -203,6 +210,7 @@ impl InstinctCoreMut {
     }
 
     /// Ghi trọng số (direct memory write)
+    #[allow(dead_code)]
     fn set_weight(&mut self, idx: usize, value: f32) {
         let offset = idx * 4;
         let bytes = value.to_le_bytes();
@@ -210,6 +218,7 @@ impl InstinctCoreMut {
     }
 
     /// Hash ngữ cảnh
+    #[allow(dead_code)]
     fn hash_context(&self, tokens: &[usize], max_lookback: usize) -> usize {
         let mut hash = 2166136261u64;
         let lookback = tokens.len().min(max_lookback);
@@ -224,6 +233,7 @@ impl InstinctCoreMut {
     }
 
     /// Học online (Hebbian Learning): Tăng/giảm trọng số dựa trên reward
+    #[allow(dead_code)]
     pub fn learn(&mut self, context_tokens: &[usize], reward: f32, learning_rate: f32) {
         let idx = self.hash_context(context_tokens, 32);
         let current = self.get_weight(idx);
@@ -234,6 +244,7 @@ impl InstinctCoreMut {
     }
 
     /// Batch update: Học từ nhiều mẫu cùng lúc
+    #[allow(dead_code)]
     pub fn batch_learn(&mut self, samples: &[(Vec<usize>, f32)], learning_rate: f32) {
         for (context, reward) in samples {
             self.learn(context, *reward, learning_rate);
@@ -241,6 +252,7 @@ impl InstinctCoreMut {
     }
 
     /// Flush thay đổi ra đĩa (auto khi drop, nhưng có thể gọi thủ công)
+    #[allow(dead_code)]
     pub fn flush(&mut self) -> Result<(), String> {
         self.weights_mut
             .flush()
@@ -253,6 +265,7 @@ impl InstinctCoreMut {
 // =============================================================================
 
 /// Phát hiện pattern toán học trong tokens (ví dụ: "+", "=", "solve")
+#[allow(dead_code)]
 pub fn detect_math_pattern(tokens: &[usize], vocab_size: usize) -> bool {
     // Giả sử token "+" ~ 29, "=" ~ 25, số ~ [16-25]
     // (Thực tế cần tra bảng tokenizer)
@@ -260,6 +273,7 @@ pub fn detect_math_pattern(tokens: &[usize], vocab_size: usize) -> bool {
 }
 
 /// Phát hiện pattern code (ví dụ: "{", "fn", "def")
+#[allow(dead_code)]
 pub fn detect_code_pattern(tokens: &[usize]) -> bool {
     // Heuristic đơn giản: Nếu có nhiều ký tự đặc biệt code
     // (Cần cải tiến bằng regex trên decoded text)

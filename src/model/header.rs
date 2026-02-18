@@ -89,6 +89,7 @@ impl FileHeader {
         write_u32_le(buf, 144, self.max_seq_len);
     }
 
+    #[allow(dead_code)]
     pub fn header_size(&self) -> usize {
         if self.version >= 2 { HEADER_SIZE } else { 128 }
     }
@@ -103,14 +104,17 @@ impl FileHeader {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn is_moe(&self) -> bool {
         self.n_experts >= 2
     }
 
+    #[allow(dead_code)]
     pub fn has_int4(&self) -> bool {
         self.int4_group_size > 0
     }
 
+    #[allow(dead_code)]
     pub fn has_depth_router(&self) -> bool {
         self.depth_router_layer > 0
     }
